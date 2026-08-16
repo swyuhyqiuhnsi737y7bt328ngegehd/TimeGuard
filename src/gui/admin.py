@@ -18,10 +18,51 @@ def _save_policy(cfg):
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
+def _prompt_password(root, title, prompt):
+    """模态密码输入框：可聚焦、可输入、文字自动换行。返回输入内容或 None（取消）。"""
+    dlg = tk.Toplevel(root)
+    dlg.title(title)
+    dlg.attributes("-topmost", True)
+    dlg.configure(bg="#f5f6fa")
+    w, h = 380, 190
+    x = root.winfo_rootx() + max(0, (root.winfo_width() - w) // 2)
+    y = root.winfo_rooty() + max(0, (root.winfo_height() - h) // 2)
+    dlg.geometry(f"{w}x{h}+{x}+{y}")
+    dlg.resizable(False, False)
+    dlg.transient(root)
+    result = {"val": None}
+    tk.Label(dlg, text=prompt, font=("Microsoft YaHei", 10), bg="#f5f6fa", fg="#333",
+             wraplength=340, justify="left").pack(padx=18, pady=(16, 8))
+    entry = tk.Entry(dlg, show="*", font=("Microsoft YaHei", 12), width=24)
+    entry.pack(padx=18, pady=6)
+
+    def ok():
+        result["val"] = entry.get()
+        dlg.destroy()
+
+    def cc():
+        dlg.destroy()
+
+    btns = tk.Frame(dlg, bg="#f5f6fa")
+    btns.pack(pady=8)
+    tk.Button(btns, text="确定", width=8, command=ok).pack(side="left", padx=8)
+    tk.Button(btns, text="取消", width=8, command=cc).pack(side="left", padx=8)
+    dlg.bind("<Return>", lambda e: ok())
+    dlg.bind("<Escape>", lambda e: cc())
+    dlg.protocol("WM_DELETE_WINDOW", cc)
+    try:
+        dlg.grab_set()
+    except Exception:
+        pass
+    entry.focus_set()
+    dlg.wait_window()
+    return result["val"]
+
+
 def _ask_password(root, cfg) -> bool:
     if not cfg.get("parent_password_hash"):
         return True
-    pwd = simpledialog.askstring("家长验证", "请输入家长密码：", show="*", parent=root)
+    pwd = _prompt_password(root, "家长验证", "请输入家长密码：")
     if pwd is None:
         return False
     if policy.password_ok(cfg, pwd):
@@ -31,18 +72,40 @@ def _ask_password(root, cfg) -> bool:
 
 
 def _set_password(root, cfg):
-    p1 = simpledialog.askstring("设置家长密码", "请输入新密码（至少 4 位）：", show="*", parent=root)
+    p1 = _prompt_password(root, "设置家长密码", "请输入新密码（至少 4 位）：")
     if p1 is None:
         return False
     if len(p1) < 4:
         messagebox.showerror("TimeGuard", "密码至少 4 位", parent=root)
         return False
-    p2 = simpledialog.askstring("设置家长密码", "请再次输入新密码：", show="*", parent=root)
+    p2 = _prompt_password(root, "设置家长密码", "请再次输入新密码：")
     if p1 != p2:
         messagebox.showerror("TimeGuard", "两次输入不一致", parent=root)
         return False
     cfg["parent_password_hash"] = util.sha256_hex(p1)
     return True
+
+
+def _ring_running() -> bool:
+    """保护环（core）是否在运行。"""
+    try:
+        if util.find_pid_by_name("core.exe"):
+            return True
+        pid = int(util.read_text(paths.service_pid_path("core"), "0") or "0")
+        return bool(pid) and util.process_alive(pid, "python.exe")
+    except Exception:
+        return False
+
+
+def _start_ring():
+    """启动 fileguard + core（守望者会自动补全）。"""
+    try:
+        fg = os.path.join(paths.app_root(), "fileguard.exe")
+        if os.path.exists(fg):
+            util.spawn([fg])
+        util.spawn_service("core")
+    except Exception as e:
+        logger.error(f"启动保护环失败: {e}")
 
 
 def _remove_run_key():
@@ -86,6 +149,14 @@ def _uninstall(root):
         os.remove(paths.quit_flag_path())
     except OSError:
         pass
+    # 确保配置（含家长密码）被清除：即使删除失败，也先就地清空密码哈希
+    pol = os.path.join(paths.app_root(), "config", "policy.json")
+    try:
+        if os.path.exists(pol):
+            with open(pol, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"parent_password_hash": "", "version": 1}))
+    except Exception:
+        pass
     removed = 0
     root_dir = paths.app_root()
     for f in (glob.glob(os.path.join(root_dir, "*.exe")) +
@@ -118,14 +189,11 @@ def main():
         root.destroy()
         return
 
-    # 首次使用：强制设置密码
+    # 首次使用：提示设置密码，但不强制（取消也能继续浏览设置）
     if not cfg.get("parent_password_hash"):
-        messagebox.showinfo("TimeGuard", "首次使用，请先设置家长密码（密码为空时限制不生效）。", parent=root)
-        if not _set_password(root, cfg):
-            root.destroy()
-            return
-        _save_policy(cfg)
-        cfg = policy.load()
+        messagebox.showinfo("TimeGuard",
+                            "尚未设置家长密码，时间限制不会生效。\n"
+                            "点击下方“修改密码”按钮即可设置。", parent=root)
 
     pad = {"padx": 12, "pady": 6}
     frm = ttk.Frame(root)
@@ -208,9 +276,17 @@ def main():
         ncfg["tamper_penalty_minutes"] = max(0, pen.get())
         try:
             _save_policy(ncfg)
-            messagebox.showinfo("TimeGuard", "设置已保存，立即生效。", parent=root)
         except Exception as e:
             messagebox.showerror("TimeGuard", f"保存失败：{e}", parent=root)
+            return
+        if not _ring_running():
+            if messagebox.askyesno("TimeGuard",
+                                   "主控程序（core）未在运行，时间限制不会生效。\n是否立即启动？",
+                                   parent=root):
+                _start_ring()
+                messagebox.showinfo("TimeGuard", "已启动。请稍候在任务栏托盘（^ 溢出区）查看图标。",
+                                    parent=root)
+        messagebox.showinfo("TimeGuard", "设置已保存，立即生效。", parent=root)
 
     def lock_now():
         from core import enforcer

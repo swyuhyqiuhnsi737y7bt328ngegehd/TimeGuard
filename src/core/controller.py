@@ -45,18 +45,67 @@ def _lock_now():
     enforcer.ensure_lockscreen()
 
 
+_quit_dlg_lock = threading.Lock()
+_quit_dlg_open = False
+
+
 def _quit_app():
+    """家长确认退出：模态密码框（防重复弹窗导致卡退、可聚焦输入、文字完整换行）。"""
+    global _quit_dlg_open
+    if not _quit_dlg_lock.acquire(blocking=False):
+        return
+    if _quit_dlg_open:
+        _quit_dlg_lock.release()
+        return
+    _quit_dlg_open = True
     try:
         import tkinter as tk
-        from tkinter import simpledialog
-        r = tk.Tk()
-        r.withdraw()
-        pwd = simpledialog.askstring("退出 TimeGuard", "请输入家长密码：", show="*", parent=r)
-        r.destroy()
-        if pwd is not None and policy.password_ok(policy.load(), pwd):
-            util.write_quit_flag()
+        top = tk.Tk()
+        top.title("退出 TimeGuard")
+        top.attributes("-topmost", True)
+        top.configure(bg="#f5f6fa")
+        w, h = 400, 210
+        sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
+        top.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2)}")
+        top.resizable(False, False)
+        tk.Label(top, text="输入家长密码确认退出\n（退出后保护停止，需重新启动才能恢复）",
+                 font=("Microsoft YaHei", 10), bg="#f5f6fa", fg="#333",
+                 justify="left").pack(padx=20, pady=(18, 8))
+        entry = tk.Entry(top, show="*", font=("Microsoft YaHei", 12), width=24)
+        entry.pack(padx=20, pady=6)
+        err = tk.Label(top, text="", font=("Microsoft YaHei", 9), fg="#c33", bg="#f5f6fa")
+        err.pack()
+        btns = tk.Frame(top, bg="#f5f6fa")
+        btns.pack(pady=10)
+
+        def submit():
+            if policy.password_ok(policy.load(), entry.get()):
+                util.write_quit_flag()
+                top.destroy()
+            else:
+                entry.delete(0, "end")
+                err.configure(text="密码错误")
+
+        def cancel():
+            top.destroy()
+
+        tk.Button(btns, text="确定", width=8, command=submit).pack(side="left", padx=8)
+        tk.Button(btns, text="取消", width=8, command=cancel).pack(side="left", padx=8)
+        top.bind("<Return>", lambda e: submit())
+        top.bind("<Escape>", lambda e: cancel())
+        top.protocol("WM_DELETE_WINDOW", cancel)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        top.focus_force()
+        entry.focus_set()
+        top.mainloop()
     except Exception as e:
-        logger.error(f"退出对话框失败: {e}")
+        logger.error(f"退出对话框异常: {e}")
+    finally:
+        _quit_dlg_open = False
+        _quit_dlg_lock.release()
 
 
 def start_tray():
