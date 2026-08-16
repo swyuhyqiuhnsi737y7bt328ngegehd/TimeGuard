@@ -1,23 +1,40 @@
 @echo off
-rem 用 PyInstaller 打包 4 个 Python 模块为独立 exe
+rem Build the 4 Python modules with PyInstaller.
 setlocal
 cd /d "%~dp0\.."
-echo [0/5] 安装构建依赖（pyinstaller pystray pillow）...
+@rem ===== stop running TimeGuard ring before build =====
+if not exist dist mkdir dist
+if not exist dist\state mkdir dist\state 2>nul
+powershell -NoProfile -Command "try { [IO.File]::WriteAllText('dist\state\quit.flag', ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString())) } catch {}"
+echo [0/6] Stopping running TimeGuard processes...
+ping -n 7 127.0.0.1 >nul
+taskkill /F /IM core.exe >nul 2>&1
+taskkill /F /IM lockscreen.exe >nul 2>&1
+taskkill /F /IM guardian.exe >nul 2>&1
+taskkill /F /IM fileguard.exe >nul 2>&1
+ping -n 4 127.0.0.1 >nul
+rmdir /s /q dist\state >nul 2>&1
+@rem ===== end stop block =====
+
+echo [1/6] Installing build deps (pyinstaller pystray pillow) ...
 python -m pip install pyinstaller pystray pillow
-if errorlevel 1 ( echo [错误] pip 安装失败，请检查网络 & exit /b 1 )
-echo [1/5] core.exe（主控制 + 托盘）
+if errorlevel 1 (
+  echo [WARN] pip install failed, trying to continue with installed packages...
+  python -c "import PyInstaller" >nul 2>&1 || ( echo [ERROR] PyInstaller not available & exit /b 1 )
+)
+echo [2/6] core.exe (main controller + tray)
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name core --paths src src\core\controller.py
 if errorlevel 1 exit /b 1
-echo [2/5] guardian.exe（守望进程，安装时会复制成随机名副本）
+echo [3/6] guardian.exe (watchdog, copied to random names at install)
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name guardian --paths src src\guard\watchdog.py
 if errorlevel 1 exit /b 1
-echo [3/5] lockscreen.exe（锁定屏幕）
+echo [4/6] lockscreen.exe (lock screen)
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name lockscreen --paths src src\lock\lockscreen.py
 if errorlevel 1 exit /b 1
-echo [4/5] admin.exe（家长管理）
+echo [5/6] admin.exe (parent console)
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name admin --paths src src\gui\admin.py
 if errorlevel 1 exit /b 1
-echo [5/5] 复制默认配置
+echo [6/6] Copying default config (only if missing, keep user settings)
 if not exist dist\config mkdir dist\config
-copy /y config\policy.json dist\config\ >nul
-echo 完成: dist\core.exe guardian.exe lockscreen.exe admin.exe
+if not exist dist\config\policy.json copy /y config\policy.json dist\config\ >nul
+echo Done: dist\core.exe guardian.exe lockscreen.exe admin.exe
