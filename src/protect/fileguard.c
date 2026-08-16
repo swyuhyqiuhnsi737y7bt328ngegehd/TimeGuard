@@ -11,6 +11,8 @@
 #define _UNICODE
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 #include <wchar.h>
 #include <string.h>
 
@@ -121,14 +123,30 @@ static int proc_alive(DWORD pid)
     return 1;
 }
 
+/* 退出标记是否新鲜（5 分钟内写入的才有效；残留的旧标记不阻止拉起 core） */
+static int quit_flag_active(void)
+{
+    wchar_t qf[MAX_PATH];
+    wsprintfW(qf, L"%lsstate\\quit.flag", g_dir);
+    if (!file_exists(qf)) return 0;
+    HANDLE h = CreateFileW(qf, GENERIC_READ, SHARE_RW, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    char buf[32] = {0};
+    DWORD r = 0;
+    ReadFile(h, buf, 31, &r, NULL);
+    CloseHandle(h);
+    double t = atof(buf);
+    return (t > 0.0) && ((double)time(NULL) - t) < 300.0;
+}
+
 /* 最后防线：core 死了就把它拉起来（仅已安装模式；收到退出指令则不再拉起） */
 static void ensure_core(void)
 {
-    wchar_t marker[MAX_PATH], pidf[MAX_PATH], core[MAX_PATH], quitf[MAX_PATH];
+    wchar_t marker[MAX_PATH], pidf[MAX_PATH], core[MAX_PATH];
     wsprintfW(marker, L"%lsstate\\installed.flag", g_dir);
     if (!file_exists(marker)) return;
-    wsprintfW(quitf, L"%lsstate\\quit.flag", g_dir);
-    if (file_exists(quitf)) return;   /* 已要求退出（卸载/家长退出），不复活 core */
+    if (quit_flag_active()) return;   /* 已要求退出（卸载/家长退出），不复活 core */
     wsprintfW(pidf, L"%lsstate\\core.pid", g_dir);
     if (file_exists(pidf) && proc_alive(read_pid(pidf))) return;
     wsprintfW(core, L"%lscore.exe", g_dir);

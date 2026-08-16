@@ -190,7 +190,7 @@ def main():
     locker.lock_self()  # 占用自己的 exe 文件，阻止被删除/改名
     logger.info(f"guardian[{token}] 启动 pid={os.getpid()}")
     while True:
-        if os.path.exists(paths.quit_flag_path()):
+        if util.quit_flag_active():
             logger.info(f"guardian[{token}] 收到退出指令")
             break
         try:

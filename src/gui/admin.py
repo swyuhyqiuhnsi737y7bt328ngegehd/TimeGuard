@@ -65,7 +65,7 @@ def _uninstall(root):
                                parent=root):
         return
     try:
-        util.write_text(paths.quit_flag_path(), "1")
+        util.write_quit_flag()
     except OSError:
         pass
     names = ["fileguard.exe", "core.exe", "lockscreen.exe", "guardian.exe", "admin.exe"]
@@ -79,6 +79,13 @@ def _uninstall(root):
             pass
     _remove_run_key()
     time.sleep(1)
+    # 清理退出标记：残留的 quit.flag 会导致下次启动即退出（重试直到成功）
+    for _ in range(10):
+        try:
+            os.remove(paths.quit_flag_path())
+            break
+        except OSError:
+            time.sleep(1)
     removed = 0
     root_dir = paths.app_root()
     for f in (glob.glob(os.path.join(root_dir, "*.exe")) +
@@ -100,6 +107,7 @@ def _uninstall(root):
 
 def main():
     if not util.single_instance("admin"):
+        util.notify_ui("TimeGuard", "管理界面已在运行（请查看已打开的窗口）。")
         return
     cfg = policy.load()
     root = tk.Tk()

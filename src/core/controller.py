@@ -54,7 +54,7 @@ def _quit_app():
         pwd = simpledialog.askstring("退出 TimeGuard", "请输入家长密码：", show="*", parent=r)
         r.destroy()
         if pwd is not None and policy.password_ok(policy.load(), pwd):
-            util.write_text(paths.quit_flag_path(), "1")
+            util.write_quit_flag()
     except Exception as e:
         logger.error(f"退出对话框失败: {e}")
 
@@ -105,6 +105,8 @@ def _ensure_protection():
 
 def main():
     if not util.single_instance("core"):
+        if util.launched_by_user():
+            util.notify_ui("TimeGuard", "主控程序已在运行（请看任务栏托盘图标）。")
         return
     util.write_text(paths.service_pid_path("core"), str(os.getpid()))
     if paths.is_frozen():
@@ -122,7 +124,7 @@ def main():
     st = {"enforced": False, "reminded": False, "warned_no_pwd": False}
     tick_no = 0
     while True:
-        if os.path.exists(paths.quit_flag_path()):
+        if util.quit_flag_active():
             logger.info("core 收到退出指令")
             break
         try:

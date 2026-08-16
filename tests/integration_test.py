@@ -51,7 +51,7 @@ def stop_all():
     """写退出标记，等所有进程自行退出；再强清 fileguard 与可能漏网的源码 core。"""
     try:
         with open(os.path.join(STATE, "quit.flag"), "w") as f:
-            f.write("1")
+            f.write(str(time.time()))
     except OSError:
         pass
     time.sleep(7)
@@ -64,7 +64,8 @@ def stop_all():
         subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
                         "$p = Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
                         "Where-Object { $_.CommandLine -like '*core.controller*' -or "
-                        "$_.CommandLine -like '*guard.watchdog*' }; "
+                        "$_.CommandLine -like '*guard.watchdog*' -or "
+                        "$_.CommandLine -like '*lock.lockscreen*' }; "
                         "foreach ($x in $p) { Stop-Process -Id $x.ProcessId -Force -ErrorAction SilentlyContinue }"],
                        capture_output=True, timeout=60)
     except Exception:
@@ -151,7 +152,7 @@ def main():
     # 注意：本机进程创建频繁、PID 可能被快速复用，pid 判断不可靠，
     # 因此用“命令行扫描”做权威校验（本测试环境 python 高度活跃）。
     with open(os.path.join(STATE, "quit.flag"), "w") as f:
-        f.write("1")
+        f.write(str(time.time()))
 
     def guard_proc_count():
         try:

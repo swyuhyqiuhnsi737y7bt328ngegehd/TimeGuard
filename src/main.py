@@ -77,9 +77,10 @@ def cmd_uninstall(args):
     target = os.path.abspath(args.dir or DIST)
     state = os.path.join(target, "state")
     os.makedirs(state, exist_ok=True)
+    qf = os.path.join(state, "quit.flag")
     try:
-        with open(os.path.join(state, "quit.flag"), "w") as f:
-            f.write("1")
+        with open(qf, "w") as f:
+            f.write(str(time.time()))
         print("[退出] 已写入退出标记")
     except OSError as e:
         print("[警告] 写入退出标记失败:", e)
@@ -100,6 +101,13 @@ def cmd_uninstall(args):
         except Exception:
             pass
     time.sleep(1)
+    # 清理退出标记：残留会导致下次启动即退出
+    for _ in range(10):
+        try:
+            os.remove(qf)
+            break
+        except OSError:
+            time.sleep(1)
     try:
         import winreg
         k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE)

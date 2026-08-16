@@ -174,6 +174,80 @@ def paths_src_dir():
     return paths.src_dir()
 
 
+# ---------------- 退出标记（带时间戳，防残留导致下次启动即退出） ----------------
+
+QUIT_FLAG_MAX_AGE = 300  # 5 分钟内写入的退出标记才有效
+
+
+def write_quit_flag():
+    """写入退出标记（带时间戳）。"""
+    write_text(paths_quit_flag_path(), str(time.time()))
+
+
+def quit_flag_active() -> bool:
+    """退出标记是否存在且新鲜；残留的旧标记不生效（防止卸载后下次启动即退出）。"""
+    try:
+        v = float(read_text(paths_quit_flag_path(), "0"))
+        return (time.time() - v) < QUIT_FLAG_MAX_AGE
+    except Exception:
+        return False
+
+
+def paths_quit_flag_path():
+    from . import paths
+    return paths.quit_flag_path()
+
+
+def notify_ui(title: str, msg: str):
+    """弹出提示框（告知单实例冲突等用户可见事件）。"""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        r = tk.Tk()
+        r.withdraw()
+        messagebox.showinfo(title, msg, parent=r)
+        r.destroy()
+    except Exception:
+        pass
+
+
+def launched_by_user() -> bool:
+    """父进程是否为 explorer.exe（即用户从桌面/资源管理器双击启动）。
+    用于区分“用户手动运行”和“守护进程自动拉起”，避免竞态下乱弹提示框。"""
+    TH32CS_SNAPPROCESS = 0x2
+    try:
+        snap = _k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == -1 or snap == (1 << 64) - 1:
+            return False
+        try:
+            mypid = os.getpid()
+            pe = _PROCESSENTRY32W()
+            pe.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            ppid = 0
+            if not _k32.Process32FirstW(snap, ctypes.byref(pe)):
+                return False
+            while True:
+                if int(pe.th32ProcessID) == mypid:
+                    ppid = int(pe.th32ParentProcessID)
+                    break
+                if not _k32.Process32NextW(snap, ctypes.byref(pe)):
+                    return False
+            if not ppid:
+                return False
+            if not _k32.Process32FirstW(snap, ctypes.byref(pe)):
+                return False
+            while True:
+                if int(pe.th32ProcessID) == ppid:
+                    return pe.szExeFile.lower() == "explorer.exe"
+                if not _k32.Process32NextW(snap, ctypes.byref(pe)):
+                    return False
+        finally:
+            _k32.CloseHandle(snap)
+    except Exception:
+        return False
+    return False
+
+
 # ---------------- 单实例 ----------------
 
 _k32.CreateMutexW.restype = wintypes.HANDLE

@@ -118,6 +118,8 @@ def _show_lock(root, flag, state):
 
 def main():
     if not util.single_instance("lockscreen"):
+        if util.launched_by_user():
+            util.notify_ui("TimeGuard", "锁屏服务已在运行（无需重复启动）。")
         return
     util.write_text(paths.service_pid_path("lockscreen"), str(os.getpid()))
     logger.info(f"lockscreen 启动 pid={os.getpid()}")
@@ -133,7 +135,7 @@ def main():
 
     def poll():
         tick[0] += 1
-        if os.path.exists(paths.quit_flag_path()):
+        if util.quit_flag_active():
             root.destroy()
             return
         flag = util.read_json(paths.lock_flag_path(), None)
