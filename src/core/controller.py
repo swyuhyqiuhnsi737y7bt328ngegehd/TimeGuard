@@ -63,6 +63,7 @@ def start_tray():
     global _tray_icon
     img = _make_icon_image()
     if img is None:
+        logger.warn("托盘图标创建失败（缺少 Pillow 库？），仅日志运行")
         return
     try:
         import pystray
@@ -72,8 +73,20 @@ def start_tray():
                                       pystray.MenuItem("立即锁定", _lock_now),
                                       pystray.MenuItem("退出程序（需家长密码）", _quit_app)))
         threading.Thread(target=_tray_icon.run, daemon=True).start()
+        # 启动提示：Win11 托盘图标默认在溢出区(^)里，弹通知让用户知道程序已运行
+        threading.Timer(3.0, _notify_startup).start()
     except Exception as e:
-        logger.info(f"托盘不可用: {e}")
+        logger.error(f"托盘启动失败: {e}")
+
+
+def _notify_startup():
+    global _tray_icon
+    try:
+        if _tray_icon is not None:
+            _tray_icon.notify("TimeGuard 正在运行（托盘图标若在 ^ 溢出区，可拖出固定）",
+                              "TimeGuard 时间控制")
+    except Exception:
+        pass
 
 
 def _apply_extra_requests():
