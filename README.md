@@ -33,6 +33,15 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 3. 最后防线：C 程序 fileguard 即使其它进程全灭，也会检测 core 死亡并直接拉起它（仅已安装模式）；
 4. 拉起去重：4 秒闸门防止多个守望者同时拉起同一进程；同名副本启动时自检去重，避免重复实例。
 
+### 锁屏加固（src/lock/winlock.py，Windows 原生 API）
+- 锁定期间隐藏任务栏（含多显示器副任务栏），解锁/退出时自动恢复；
+- 鼠标限制在锁屏区域（ClipCursor），并周期性重新施加，防止被移出；
+- 锁窗持续置顶压制（SetWindowPos + SetForegroundWindow 轮询），防止被其它程序窗口盖住；
+- 低级键盘钩子屏蔽逃生键：Alt+Tab / Alt+F4 / Win 键 / 菜单键 / Ctrl+Esc /
+  Ctrl+Shift+Esc（任务管理器）等；Ctrl+Alt+Del 为系统保留的“安全注意序列”，无法屏蔽；
+- 未锁定时周期性自愈：进程被强杀后重启时自动恢复任务栏与鼠标，不留残留状态；
+- 配置/状态文件读取兼容带 BOM 的 UTF-8（防记事本等编辑器写坏配置）。
+
 ### 文件自我保护（占用自己）
 - fileguard.exe（C 程序）：以共享模式 FILE_SHARE_READ | FILE_SHARE_WRITE（不含 FILE_SHARE_DELETE）打开安装目录下所有 .exe 与 config/policy.json 并一直持有句柄——存活期间这些文件无法被删除/改名，但仍可正常读写、程序仍可运行。每 5 秒扫描一次，新出现的文件（如新建的随机名副本）也会被锁上；
 - Python 版兜底（share/lockfile.py）：每个进程启动时也占用自己的 exe 与策略文件；
@@ -130,7 +139,8 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 
 ## 七、已知限制
 - 互守是笨方法：管理员同时结束所有进程 + 删除文件仍可解除（本就不是 rootkit）；
-- 锁定界面基于 tkinter 全屏置顶，仅覆盖主显示器；
+- 锁定界面基于 tkinter 全屏置顶，仅覆盖主显示器；鼠标被限制在主屏内，副屏不可操作；
+- Ctrl+Alt+Del 无法被用户态程序屏蔽（系统安全注意序列）；
 - 用量按开机在线时间累计，不区分实际敲键/空闲（简单可靠）；
 - 系统休眠/睡眠造成的时长缺口不累计；
 - 建议 NTFS + 给家长账户设密码。

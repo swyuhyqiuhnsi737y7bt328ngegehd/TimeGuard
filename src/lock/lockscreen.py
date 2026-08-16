@@ -1,12 +1,43 @@
-"""锁定屏幕进程 lockscreen.exe：常驻；出现 lock.flag 时全屏锁定；家长密码解锁（自动加时）。"""
+"""锁定屏幕进程 lockscreen.exe：常驻；出现 lock.flag 时全屏锁定并加固
+（隐藏任务栏 / 鼠标限制在锁屏区域 / 持续置顶压制 / 屏蔽 Alt+Tab、Win 键、
+Alt+F4、任务管理器等逃生键）；家长密码解锁（自动加时）。
+
+解锁或退出时自动恢复任务栏并解除鼠标限制；未锁定时周期性自愈，
+防止进程被强杀后桌面残留异常状态。
+"""
 import os
 import time
 import tkinter as tk
 
 from core import policy
+from lock import winlock
 from share import logger, paths, util
 
 _POLL_MS = 1000
+_REHIDE_EVERY = 4   # 锁定时每 N 次轮询重新隐藏任务栏（防 explorer 重启后复现）
+_HEAL_EVERY = 5     # 未锁定时每 N 次轮询自愈：恢复任务栏/解除鼠标限制
+
+
+def _release_lock(state):
+    """解除锁定与全部加固：恢复任务栏、解除鼠标限制、卸载键盘钩子、销毁锁窗。"""
+    try:
+        winlock.show_taskbar()
+    except Exception:
+        pass
+    try:
+        winlock.unclip()
+    except Exception:
+        pass
+    try:
+        winlock.stop_keyboard_block()
+    except Exception:
+        pass
+    if state.get("frame") is not None:
+        try:
+            state["frame"].destroy()
+        except Exception:
+            pass
+        state["frame"] = None
 
 
 def _unlock(top, state, entry, hint):
@@ -20,8 +51,7 @@ def _unlock(top, state, entry, hint):
         except Exception as e:
             logger.error(f"加时申请失败: {e}")
         enforcer_clear_lock()
-        top.destroy()
-        state["frame"] = None
+        _release_lock(state)
     else:
         entry.delete(0, "end")
         hint.configure(text="密码错误，请重试")
@@ -58,8 +88,11 @@ def _show_lock(root, flag, state):
                     command=lambda: _unlock(top, state, entry, hint))
     btn.pack(pady=10)
     entry.bind("<Return>", lambda e: _unlock(top, state, entry, hint))
+    entry.focus_set()
     state["frame"] = top
     state["entry"] = entry
+    state["info"] = info
+    state["count"] = count
     # 用量信息
     try:
         from datetime import datetime
@@ -70,9 +103,17 @@ def _show_lock(root, flag, state):
         state["usage_text"] = f"已用 {int(used)} 分钟 / 配额 {int(quota)} 分钟（含加时 {int(extra)}）"
     except Exception:
         state["usage_text"] = ""
-    entry.focus_set()
-    state["info"] = info
-    state["count"] = count
+    # ---- 锁屏加固：隐藏任务栏 + 限制鼠标 + 屏蔽逃生键 + 置顶 ----
+    try:
+        state["hwnd"] = int(top.winfo_id())
+        winlock.hide_taskbar()
+        winlock.clip_to_window(state["hwnd"])
+        if not winlock.start_keyboard_block():
+            logger.warn("键盘钩子安装失败（逃生键屏蔽未生效）")
+        winlock.force_topmost(state["hwnd"])
+        logger.info("锁屏加固已启用（任务栏隐藏/鼠标限制/键位屏蔽/置顶）")
+    except Exception as e:
+        logger.error(f"锁屏加固失败: {e}")
 
 
 def main():
@@ -86,9 +127,12 @@ def main():
         logger.error(f"无法创建锁定界面（无桌面会话？）: {e}")
         return
     root.withdraw()
-    state = {"frame": None, "entry": None, "usage_text": ""}
+    state = {"frame": None, "entry": None, "info": None, "count": None,
+             "usage_text": "", "hwnd": None}
+    tick = [0]
 
     def poll():
+        tick[0] += 1
         if os.path.exists(paths.quit_flag_path()):
             root.destroy()
             return
@@ -101,23 +145,35 @@ def main():
                 h, m = divmod(left // 60, 60)
                 reason = str(flag.get("reason", "已锁定"))
                 try:
-                    state["frame"].lift()
                     state["info"].configure(text=f"{reason}\n剩余 {h} 小时 {m} 分钟")
                     state["count"].configure(text=state["usage_text"])
+                    # 持续压制：防其它窗口盖过锁屏、防鼠标被移出锁定区域
+                    winlock.force_topmost(state["hwnd"])
+                    winlock.clip_to_window(state["hwnd"])
+                    if tick[0] % _REHIDE_EVERY == 0:
+                        winlock.hide_taskbar()
                 except Exception:
                     pass
         else:
             if state["frame"] is not None:
+                _release_lock(state)
+                logger.info("锁定解除，加固已释放")
+            elif tick[0] % _HEAL_EVERY == 0:
+                # 自愈：进程被强杀后重启 / 异常退出时，确保任务栏与鼠标不被残留状态影响
                 try:
-                    state["frame"].destroy()
+                    winlock.show_taskbar()
+                    winlock.unclip()
+                    winlock.stop_keyboard_block()
                 except Exception:
                     pass
-                state["frame"] = None
         root.after(_POLL_MS, poll)
 
     root.after(_POLL_MS, poll)
-    root.mainloop()
-    logger.info("lockscreen 退出")
+    try:
+        root.mainloop()
+    finally:
+        _release_lock(state)
+        logger.info("lockscreen 退出")
 
 
 if __name__ == "__main__":

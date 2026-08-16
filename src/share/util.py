@@ -23,8 +23,9 @@ def random_name(n: int = 8) -> str:
 
 
 def read_json(path, default=None):
+    # utf-8-sig：兼容带 BOM 的 UTF-8 文件（记事本/PS 旧版写入可能带 BOM）
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     except Exception:
         return default
@@ -45,7 +46,7 @@ def write_text(path, text):
 
 def read_text(path, default=""):
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             return f.read()
     except Exception:
         return default
