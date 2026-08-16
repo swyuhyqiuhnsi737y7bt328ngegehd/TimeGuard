@@ -1,0 +1,6 @@
+# 运行期依赖（打包时也需要）
+pystray>=0.19.0
+pillow>=9.0.0
+# 构建期依赖（可选，脚本会自动安装）
+# pyinstaller
+# nuitka
