@@ -14,6 +14,8 @@ taskkill /F /IM guardian.exe >nul 2>&1
 taskkill /F /IM fileguard.exe >nul 2>&1
 ping -n 4 127.0.0.1 >nul
 rmdir /s /q dist\state >nul 2>&1
+@rem remove leftover random-named guardian copies from old sessions
+powershell -NoProfile -Command "Get-ChildItem 'dist\*.exe' | Where-Object { $_.BaseName -match '^[a-z0-9]{8}$' } | Remove-Item -Force -ErrorAction SilentlyContinue"
 @rem ===== end stop block =====
 
 call "%~dp0build_cpp.bat"
