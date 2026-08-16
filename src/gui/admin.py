@@ -68,24 +68,24 @@ def _uninstall(root):
         util.write_quit_flag()
     except OSError:
         pass
-    names = ["fileguard.exe", "core.exe", "lockscreen.exe", "guardian.exe", "admin.exe"]
-    reg = util.read_json(os.path.join(paths.state_dir(), "guardians.json"), {})
-    names += [os.path.basename(p) for p in reg.get("copies", []) if isinstance(p, str)]
-    time.sleep(2)
-    for n in set(names):
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", n], capture_output=True, timeout=10)
-        except Exception:
-            pass
-    _remove_run_key()
-    time.sleep(1)
-    # 清理退出标记：残留的 quit.flag 会导致下次启动即退出（重试直到成功）
-    for _ in range(10):
-        try:
-            os.remove(paths.quit_flag_path())
+    # 先等守望者自行退出（它们看到退出标记后 3 秒内退出，不会互相拉起）
+    time.sleep(3)
+    # 按“安装目录下所有进程”反复清理，直到全部死亡（不依赖注册表，覆盖随机名副本）
+    for _ in range(8):
+        procs = [p for p in util.processes_under(paths.app_root()) if p[0] != os.getpid()]
+        if not procs:
             break
-        except OSError:
-            time.sleep(1)
+        util.kill_pids([p[0] for p in procs])
+        time.sleep(2)
+    procs = [p for p in util.processes_under(paths.app_root()) if p[0] != os.getpid()]
+    if procs:
+        logger.warn(f"卸载时仍有 {len(procs)} 个进程未停止: {procs}")
+    _remove_run_key()
+    # 确认进程全部停止后，才清理退出标记（防止残留进程因标记消失而复活互相拉起）
+    try:
+        os.remove(paths.quit_flag_path())
+    except OSError:
+        pass
     removed = 0
     root_dir = paths.app_root()
     for f in (glob.glob(os.path.join(root_dir, "*.exe")) +
@@ -101,7 +101,7 @@ def _uninstall(root):
             pass
     messagebox.showinfo("卸载完成",
                         f"已停止所有进程并移除自启动项（清理 {removed} 项）。\n"
-                        "正在运行的 exe 无法删除，请关闭本窗口后手动删除安装目录。",
+                        "本窗口(admin.exe)正在运行无法自删，关闭本窗口后手动删除安装目录即可。",
                         parent=root)
 
 

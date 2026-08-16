@@ -131,6 +131,43 @@ def find_pid_by_name(basename: str) -> int:
         _k32.CloseHandle(snap)
 
 
+def processes_under(root_dir: str):
+    """返回可执行文件位于 root_dir 下的所有 (pid, exe_path)。
+
+    用于卸载/清理：不依赖注册表，能找出目录下任意名字的进程（含随机名守望副本）。
+    """
+    root = os.path.normcase(os.path.abspath(root_dir))
+    out = []
+    TH32CS_SNAPPROCESS = 0x2
+    snap = _k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == -1 or snap == (1 << 64) - 1:
+        return out
+    try:
+        pe = _PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        if not _k32.Process32FirstW(snap, ctypes.byref(pe)):
+            return out
+        while True:
+            img = process_image(int(pe.th32ProcessID))
+            if img and img.startswith(root):
+                out.append((int(pe.th32ProcessID), img))
+            if not _k32.Process32NextW(snap, ctypes.byref(pe)):
+                break
+    finally:
+        _k32.CloseHandle(snap)
+    return out
+
+
+def kill_pids(pids):
+    """按 PID 结束进程（含子进程树）。"""
+    for pid in pids:
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+
+
 def spawn(cmd, env=None, cwd=None):
     """启动进程（隐藏控制台窗口）。失败返回 None。"""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)

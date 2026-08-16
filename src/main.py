@@ -84,30 +84,16 @@ def cmd_uninstall(args):
         print("[退出] 已写入退出标记")
     except OSError as e:
         print("[警告] 写入退出标记失败:", e)
-    names = ["fileguard.exe", "core.exe", "lockscreen.exe", "guardian.exe", "admin.exe"]
-    reg_path = os.path.join(state, "guardians.json")
-    if os.path.exists(reg_path):
-        try:
-            with open(reg_path, encoding="utf-8") as f:
-                reg = json.load(f)
-            names += [os.path.basename(p) for p in reg.get("copies", []) if isinstance(p, str)]
-        except Exception:
-            pass
-    time.sleep(2)  # 给守望者一点时间自行退出
-    for n in set(names):
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", n], capture_output=True, timeout=10)
-            print("[停止]", n)
-        except Exception:
-            pass
-    time.sleep(1)
-    # 清理退出标记：残留会导致下次启动即退出
-    for _ in range(10):
-        try:
-            os.remove(qf)
+    from share import util as _util
+    time.sleep(3)  # 给守望者一点时间自行退出（看到退出标记后不再互相拉起）
+    # 按“目标目录下所有进程”反复清理，直到全部死亡（不依赖注册表，覆盖随机名副本）
+    for _ in range(8):
+        procs = _util.processes_under(target)
+        if not procs:
             break
-        except OSError:
-            time.sleep(1)
+        _util.kill_pids([p[0] for p in procs])
+        print(f"[停止] {len(procs)} 个进程")
+        time.sleep(2)
     try:
         import winreg
         k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE)
@@ -119,6 +105,11 @@ def cmd_uninstall(args):
         winreg.CloseKey(k)
     except Exception as e:
         print("[警告] 移除自启动失败:", e)
+    # 确认进程全部停止后，才清理退出标记（防止残留进程因标记消失而复活）
+    try:
+        os.remove(qf)
+    except OSError:
+        pass
     removed = 0
     for f in (glob.glob(os.path.join(target, "*.exe")) +
               glob.glob(os.path.join(target, "*.dll")) +
