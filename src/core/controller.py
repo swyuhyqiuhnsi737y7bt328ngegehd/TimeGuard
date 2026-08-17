@@ -45,67 +45,16 @@ def _lock_now():
     enforcer.ensure_lockscreen()
 
 
-_quit_dlg_lock = threading.Lock()
-_quit_dlg_open = False
-
-
 def _quit_app():
-    """家长确认退出：模态密码框（防重复弹窗导致卡退、可聚焦输入、文字完整换行）。"""
-    global _quit_dlg_open
-    if not _quit_dlg_lock.acquire(blocking=False):
-        return
-    if _quit_dlg_open:
-        _quit_dlg_lock.release()
-        return
-    _quit_dlg_open = True
+    """家长确认退出：由独立进程(admin.exe --quit)弹模态密码框。
+
+    不在托盘线程里创建 Tk（狂点输入框曾导致整进程卡退）；
+    多开时第二个实例会因独立互斥体自动退出，不会叠加弹窗。
+    """
     try:
-        import tkinter as tk
-        top = tk.Tk()
-        top.title("退出 TimeGuard")
-        top.attributes("-topmost", True)
-        top.configure(bg="#f5f6fa")
-        w, h = 400, 210
-        sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
-        top.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2)}")
-        top.resizable(False, False)
-        tk.Label(top, text="输入家长密码确认退出\n（退出后保护停止，需重新启动才能恢复）",
-                 font=("Microsoft YaHei", 10), bg="#f5f6fa", fg="#333",
-                 justify="left").pack(padx=20, pady=(18, 8))
-        entry = tk.Entry(top, show="*", font=("Microsoft YaHei", 12), width=24)
-        entry.pack(padx=20, pady=6)
-        err = tk.Label(top, text="", font=("Microsoft YaHei", 9), fg="#c33", bg="#f5f6fa")
-        err.pack()
-        btns = tk.Frame(top, bg="#f5f6fa")
-        btns.pack(pady=10)
-
-        def submit():
-            if policy.password_ok(policy.load(), entry.get()):
-                util.write_quit_flag()
-                top.destroy()
-            else:
-                entry.delete(0, "end")
-                err.configure(text="密码错误")
-
-        def cancel():
-            top.destroy()
-
-        tk.Button(btns, text="确定", width=8, command=submit).pack(side="left", padx=8)
-        tk.Button(btns, text="取消", width=8, command=cancel).pack(side="left", padx=8)
-        top.bind("<Return>", lambda e: submit())
-        top.bind("<Escape>", lambda e: cancel())
-        top.protocol("WM_DELETE_WINDOW", cancel)
-        try:
-            top.grab_set()
-        except Exception:
-            pass
-        top.focus_force()
-        entry.focus_set()
-        top.mainloop()
+        util.spawn_service("admin", ["--quit"])
     except Exception as e:
-        logger.error(f"退出对话框异常: {e}")
-    finally:
-        _quit_dlg_open = False
-        _quit_dlg_lock.release()
+        logger.error(f"启动退出确认窗口失败: {e}")
 
 
 def start_tray():
@@ -118,7 +67,7 @@ def start_tray():
         import pystray
         _tray_icon = pystray.Icon("TimeGuard", img, "TimeGuard 时间控制",
                                   pystray.Menu(
-                                      pystray.MenuItem("打开家长设置", _open_admin),
+                                      pystray.MenuItem("打开家长设置", _open_admin, default=True),
                                       pystray.MenuItem("立即锁定", _lock_now),
                                       pystray.MenuItem("退出程序（需家长密码）", _quit_app)))
         threading.Thread(target=_tray_icon.run, daemon=True).start()
@@ -165,6 +114,30 @@ def _ensure_protection():
     watchdog.ensure_guardians()
 
 
+def _ensure_autostart():
+    """自愈开机自启动：注册表 HKCU Run 指向自己（core.exe）。
+
+    启动项只在注册表（非计划任务/启动文件夹）；每次启动都校正，
+    避免卸载测试/路径变动后重启不再自动运行。
+    """
+    if not paths.is_frozen():
+        return
+    try:
+        import winreg
+        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                               r"Software\Microsoft\Windows\CurrentVersion\Run")
+        try:
+            cur = winreg.QueryValueEx(key, "TimeGuard")[0]
+        except FileNotFoundError:
+            cur = None
+        if cur != sys.executable:
+            winreg.SetValueEx(key, "TimeGuard", 0, winreg.REG_SZ, sys.executable)
+            logger.info(f"已校正开机自启动: {sys.executable}")
+        winreg.CloseKey(key)
+    except Exception as e:
+        logger.error(f"写入开机自启动失败: {e}")
+
+
 def main():
     if not util.single_instance("core"):
         if util.launched_by_user():
@@ -173,6 +146,7 @@ def main():
     util.write_text(paths.service_pid_path("core"), str(os.getpid()))
     if paths.is_frozen():
         util.write_text(os.path.join(paths.state_dir(), "installed.flag"), "1")
+        _ensure_autostart()
     logger.info(f"core 启动 pid={os.getpid()} frozen={paths.is_frozen()}")
     locker = FileLocker()
     locker.lock_self()

@@ -1,12 +1,17 @@
-"""家长管理界面 admin.exe：策略编辑、立即锁定、加时解锁、卸载。"""
+"""家长管理界面 admin.exe：策略编辑、立即锁定、加时解锁、卸载。
+
+支持 --quit 模式：由托盘“退出程序”拉起，独立进程弹出家长密码确认框
+（避免在托盘线程里创建 Tk 导致输入异常/狂点卡退）。
+"""
 import glob
 import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, ttk
 
 from core import policy
 from share import logger, paths, util
@@ -108,6 +113,56 @@ def _start_ring():
         logger.error(f"启动保护环失败: {e}")
 
 
+def _quit_mode():
+    """--quit 模式：独立进程的家长密码确认框（由托盘菜单拉起）。"""
+    if not util.single_instance("admin_quit"):
+        return  # 已有一个确认框在显示，忽略重复点击
+    try:
+        top = tk.Tk()
+        top.title("退出 TimeGuard")
+        top.attributes("-topmost", True)
+        top.configure(bg="#f5f6fa")
+        w, h = 400, 220
+        sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
+        top.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2)}")
+        top.resizable(False, False)
+        tk.Label(top, text="输入家长密码确认退出\n（退出后保护停止，需重新启动才能恢复）",
+                 font=("Microsoft YaHei", 10), bg="#f5f6fa", fg="#333",
+                 justify="left").pack(padx=20, pady=(18, 8))
+        entry = tk.Entry(top, show="*", font=("Microsoft YaHei", 12), width=24)
+        entry.pack(padx=20, pady=6)
+        err = tk.Label(top, text="", font=("Microsoft YaHei", 9), fg="#c33", bg="#f5f6fa")
+        err.pack()
+        btns = tk.Frame(top, bg="#f5f6fa")
+        btns.pack(pady=10)
+
+        def submit():
+            if policy.password_ok(policy.load(), entry.get()):
+                util.write_quit_flag()
+                top.destroy()
+            else:
+                entry.delete(0, "end")
+                err.configure(text="密码错误")
+
+        def cancel():
+            top.destroy()
+
+        tk.Button(btns, text="确定", width=8, command=submit).pack(side="left", padx=8)
+        tk.Button(btns, text="取消", width=8, command=cancel).pack(side="left", padx=8)
+        top.bind("<Return>", lambda e: submit())
+        top.bind("<Escape>", lambda e: cancel())
+        top.protocol("WM_DELETE_WINDOW", cancel)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        top.focus_force()
+        entry.focus_set()
+        top.mainloop()
+    except Exception as e:
+        logger.error(f"退出确认窗口异常: {e}")
+
+
 def _remove_run_key():
     try:
         import winreg
@@ -177,6 +232,9 @@ def _uninstall(root):
 
 
 def main():
+    if "--quit" in sys.argv:
+        _quit_mode()
+        return
     if not util.single_instance("admin"):
         util.notify_ui("TimeGuard", "管理界面已在运行（请查看已打开的窗口）。")
         return

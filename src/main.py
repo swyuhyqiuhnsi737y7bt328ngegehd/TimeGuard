@@ -60,7 +60,8 @@ def cmd_install(args):
         k = winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY)
         winreg.SetValueEx(k, "TimeGuard", 0, winreg.REG_SZ, core)
         winreg.CloseKey(k)
-        print("[自启动] 已写入 HKCU Run:", core)
+        print("[自启动] 已写入注册表 HKCU\\...\\Run\\TimeGuard =", core)
+        print("[自启动] 位置：注册表（非计划任务/启动文件夹），登录 Windows 时自动运行")
     except Exception as e:
         print("[警告] 写入自启动失败:", e)
     fg = os.path.join(DIST, "fileguard.exe")
@@ -110,6 +111,14 @@ def cmd_uninstall(args):
         os.remove(qf)
     except OSError:
         pass
+    # 确保配置（含家长密码）被清除：即使删除失败，也先就地清空密码哈希
+    pol = os.path.join(target, "config", "policy.json")
+    try:
+        if os.path.exists(pol):
+            with open(pol, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"parent_password_hash": "", "version": 1}))
+    except Exception:
+        pass
     removed = 0
     for f in (glob.glob(os.path.join(target, "*.exe")) +
               glob.glob(os.path.join(target, "*.dll")) +
@@ -151,6 +160,15 @@ def cmd_status(args):
           " 提前提醒:", cfg.get("remind_minutes"),
           " 改时间惩罚:", cfg.get("tamper_penalty_minutes"))
     print("== 今日用量 ==", util.read_json(paths.usage_path(), {}))
+    print("== 开机自启动（注册表）==")
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY)
+        val = winreg.QueryValueEx(k, "TimeGuard")[0]
+        print("  TimeGuard =", val)
+        winreg.CloseKey(k)
+    except Exception:
+        print("  （未设置）")
     print("== 常驻进程 ==")
     for name in ["fileguard", "core", "lockscreen", "admin"]:
         pid = util.find_pid_by_name(name + ".exe")
