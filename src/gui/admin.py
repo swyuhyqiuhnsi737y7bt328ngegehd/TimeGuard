@@ -39,8 +39,16 @@ def _prompt_password(root, title, prompt):
     except Exception:
         pass
     w, h = 380, 190
-    x = root.winfo_rootx() + max(0, (root.winfo_width() - w) // 2)
-    y = root.winfo_rooty() + max(0, (root.winfo_height() - h) // 2)
+    try:
+        if root.state() == "withdrawn":
+            # 主窗口隐藏时（验证阶段）：对话框按屏幕居中
+            x = max(0, (root.winfo_screenwidth() - w) // 2)
+            y = max(0, (root.winfo_screenheight() - h) // 2)
+        else:
+            x = root.winfo_rootx() + max(0, (root.winfo_width() - w) // 2)
+            y = root.winfo_rooty() + max(0, (root.winfo_height() - h) // 2)
+    except Exception:
+        x = y = 100
     dlg.geometry(f"{w}x{h}+{x}+{y}")
     dlg.resizable(False, False)
     dlg.transient(root)
@@ -286,15 +294,8 @@ def main():
     root.title("TimeGuard 家长控制")
     root.geometry("620x880")
     root.configure(bg="#f5f6fa")
-    if not _ask_password(root, cfg):
-        root.destroy()
-        return
-
-    # 首次使用：提示设置密码，但不强制（取消也能继续浏览设置）
-    if not cfg.get("parent_password_hash"):
-        messagebox.showinfo("TimeGuard",
-                            "尚未设置家长密码，时间限制不会生效。\n"
-                            "点击下方“修改密码”按钮即可设置。", parent=root)
+    # 先隐藏主窗口：通过家长验证后才显示，避免出现空白窗口（“白屏”）
+    root.withdraw()
 
     pad = {"padx": 12, "pady": 6}
     frm = ttk.Frame(root)
@@ -444,6 +445,18 @@ def main():
     ttk.Button(btns, text="修改密码", command=change_pwd).pack(side="left", padx=6)
     ttk.Button(btns, text="卸载并退出", command=lambda: _uninstall(root)).pack(side="left", padx=6)
 
+    # 家长验证：通过后才显示主窗口（避免验证前出现空白窗口）
+    if not _ask_password(root, cfg):
+        root.destroy()
+        return
+
+    # 首次使用：提示设置密码，但不强制（取消也能继续浏览设置）
+    if not cfg.get("parent_password_hash"):
+        messagebox.showinfo("TimeGuard",
+                            "尚未设置家长密码，时间限制不会生效。\n"
+                            "点击下方“修改密码”按钮即可设置。", parent=root)
+
+    root.deiconify()
     root.mainloop()
     logger.info("admin 退出")
 

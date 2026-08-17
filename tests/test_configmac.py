@@ -21,6 +21,9 @@ def main():
     orig_reg_set = configmac._reg_set
     configmac._reg_get = lambda n: reg.get(n)
     configmac._reg_set = lambda n, v: reg.update({n: v})
+    # 磁盘写回恢复仅在打包版执行（源码模式不碰项目模板），这里模拟打包版
+    orig_frozen = paths.is_frozen
+    paths.is_frozen = lambda: True
     try:
         base_cfg = {"parent_password_hash": "abc123hash",
                     "daily_quota": {"weekday": 120, "weekend": 240}}
@@ -80,6 +83,7 @@ def main():
     finally:
         paths.policy_path = orig_policy
         paths.state_dir = orig_state
+        paths.is_frozen = orig_frozen
         configmac._reg_get = orig_reg_get
         configmac._reg_set = orig_reg_set
 
