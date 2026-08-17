@@ -65,7 +65,9 @@ def load() -> dict:
         logger.warn("检测到策略配置被外部修改（mac 校验失败），正在从备份恢复家长设置")
         restored = configmac.read_backup()
         if isinstance(restored, dict) and key and configmac.verify(restored, key):
-            _restore_in_place(restored)
+            if paths.is_frozen():
+                # 仅打包版就地写回修复；源码模式不碰项目模板文件
+                _restore_in_place(restored)
             cfg = _merge(restored)
             _last_good = cfg
             return cfg
