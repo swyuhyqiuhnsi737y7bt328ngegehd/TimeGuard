@@ -54,6 +54,7 @@ def load() -> dict:
     if not isinstance(data, dict):
         data = _last_good or {}
     if configmac.initialized():
+        configmac.ensure_local()  # 补齐密钥文件（注册表有、文件缺失时）
         key = configmac.get_key()
         if key and configmac.verify(data, key):
             cfg = _merge(data)

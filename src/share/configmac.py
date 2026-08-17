@@ -75,6 +75,17 @@ def create_key():
     return k
 
 
+def ensure_local():
+    """注册表有密钥但本地文件缺失时补齐（升级/重建后的状态一致性）。"""
+    k = get_key()
+    if k and not os.path.exists(key_path()):
+        try:
+            util.write_text(key_path(), k)
+        except Exception:
+            pass
+    return k
+
+
 def canonical(cfg: dict) -> str:
     """除 mac 外全部字段的规范 JSON（键排序、紧凑、不转义非 ASCII）。"""
     payload = {k: v for k, v in cfg.items() if k != "mac"}

@@ -235,6 +235,35 @@ def paths_quit_flag_path():
     return paths.quit_flag_path()
 
 
+def activate_existing_window(exe_basename: str):
+    """把已运行实例的窗口激活到前台（单实例冲突时给用户正确反馈）。"""
+    try:
+        _u = ctypes.WinDLL("user32")
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        _u.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+        _u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        _u.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        _u.SetForegroundWindow.argtypes = [wintypes.HWND]
+        target = str(exe_basename).lower()
+        hits = []
+
+        @WNDENUMPROC
+        def _cb(h, _):
+            pid2 = wintypes.DWORD(0)
+            _u.GetWindowThreadProcessId(h, ctypes.byref(pid2))
+            img = process_image(int(pid2.value))
+            if img and os.path.basename(img).lower() == target:
+                hits.append(h)
+            return True
+
+        _u.EnumWindows(_cb, 0)
+        for h in hits[:3]:
+            _u.ShowWindow(h, 9)  # SW_RESTORE
+            _u.SetForegroundWindow(h)
+    except Exception:
+        pass
+
+
 def notify_ui(title: str, msg: str):
     """弹出提示框（告知单实例冲突等用户可见事件）。置顶显示，避免被误认为没反应。"""
     try:
