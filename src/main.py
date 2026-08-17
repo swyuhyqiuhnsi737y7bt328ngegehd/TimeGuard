@@ -55,6 +55,28 @@ def cmd_install(args):
     os.makedirs(os.path.join(DIST, "state"), exist_ok=True)
     with open(os.path.join(DIST, "state", "installed.flag"), "w") as f:
         f.write("1")
+    # 启用配置完整性保护：生成密钥并给配置签名（防直接改文件绕过家长设置）
+    keyf = os.path.join(DIST, "state", "config.key")
+    try:
+        import secrets
+        import winreg
+        from share import configmac as _cm
+        if not os.path.exists(keyf):
+            k = secrets.token_hex(32)
+            with open(keyf, "w") as f:
+                f.write(k)
+            rk = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\TimeGuard")
+            winreg.SetValueEx(rk, "MacKey", 0, winreg.REG_SZ, k)
+            winreg.CloseKey(rk)
+            with open(dst, encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                signed = _cm.sign(raw, k)
+                with open(dst, "w", encoding="utf-8") as f:
+                    json.dump(signed, f, ensure_ascii=False, indent=2)
+            print("[配置] 已启用完整性保护（改 policy.json 会被自动恢复）")
+    except Exception as e:
+        print("[警告] 配置保护初始化失败:", e)
     try:
         import winreg
         k = winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY)
@@ -106,6 +128,19 @@ def cmd_uninstall(args):
         winreg.CloseKey(k)
     except Exception as e:
         print("[警告] 移除自启动失败:", e)
+    # 清除配置保护密钥与备份（注册表镜像；文件随 state 目录删除）
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\TimeGuard", 0,
+                           winreg.KEY_SET_VALUE)
+        for name in ("MacKey", "PolicyBackup"):
+            try:
+                winreg.DeleteValue(k, name)
+            except Exception:
+                pass
+        winreg.CloseKey(k)
+    except Exception:
+        pass
     # 确认进程全部停止后，才清理退出标记（防止残留进程因标记消失而复活）
     try:
         os.remove(qf)

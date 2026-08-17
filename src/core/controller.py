@@ -151,6 +151,12 @@ def main():
     locker = FileLocker()
     locker.lock_self()
     locker.lock(paths.policy_path())  # 阻止删除/改名策略文件
+    try:
+        from share import configmac
+        locker.lock(configmac.key_path())      # 完整性密钥
+        locker.lock(configmac.backup_path())   # 配置备份
+    except Exception:
+        pass
     _ensure_protection()
     start_tray()
     cfg = policy.load()

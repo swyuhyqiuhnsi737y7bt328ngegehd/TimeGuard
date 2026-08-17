@@ -19,8 +19,12 @@ from share import logger, paths, util
 
 def _save_policy(cfg):
     # 注意：policy.json 被 core/fileguard 占用（禁止删除），只能就地覆写，不能用 rename
+    from share import configmac
+    key = configmac.get_key() or configmac.create_key()
+    signed = configmac.sign(cfg, key)  # 带完整性签名，防止被直接改文件绕过
     with open(paths.policy_path(), "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        json.dump(signed, f, ensure_ascii=False, indent=2)
+    configmac.save_backup(signed)
 
 
 def _prompt_password(root, title, prompt):
@@ -199,6 +203,12 @@ def _uninstall(root):
     if procs:
         logger.warn(f"卸载时仍有 {len(procs)} 个进程未停止: {procs}")
     _remove_run_key()
+    # 清除配置保护密钥与备份（文件 + 注册表）
+    try:
+        from share import configmac
+        configmac.remove_all()
+    except Exception:
+        pass
     # 确认进程全部停止后，才清理退出标记（防止残留进程因标记消失而复活互相拉起）
     try:
         os.remove(paths.quit_flag_path())
@@ -238,6 +248,13 @@ def main():
     if not util.single_instance("admin"):
         util.notify_ui("TimeGuard", "管理界面已在运行（请查看已打开的窗口）。")
         return
+    # 打开前先检查配置是否被外部篡改（policy.load 会自动恢复）
+    from share import configmac
+    raw = util.read_json(paths.policy_path(), None)
+    if configmac.initialized() and (not isinstance(raw, dict)
+                                    or not configmac.verify(raw, configmac.get_key())):
+        messagebox.showwarning("TimeGuard", "检测到配置曾被外部修改，已自动恢复家长设置。",
+                               parent=None)
     cfg = policy.load()
     root = tk.Tk()
     root.title("TimeGuard 家长控制")
