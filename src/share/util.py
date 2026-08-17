@@ -236,12 +236,17 @@ def paths_quit_flag_path():
 
 
 def notify_ui(title: str, msg: str):
-    """弹出提示框（告知单实例冲突等用户可见事件）。"""
+    """弹出提示框（告知单实例冲突等用户可见事件）。置顶显示，避免被误认为没反应。"""
     try:
         import tkinter as tk
         from tkinter import messagebox
         r = tk.Tk()
         r.withdraw()
+        try:
+            r.attributes("-topmost", True)
+            r.update_idletasks()
+        except Exception:
+            pass
         messagebox.showinfo(title, msg, parent=r)
         r.destroy()
     except Exception:

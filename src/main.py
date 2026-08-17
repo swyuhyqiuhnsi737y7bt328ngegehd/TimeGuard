@@ -86,6 +86,13 @@ def cmd_install(args):
         print("[自启动] 位置：注册表（非计划任务/启动文件夹），登录 Windows 时自动运行")
     except Exception as e:
         print("[警告] 写入自启动失败:", e)
+    # 清除残留的退出标记（显式安装 = 撤销退出意图，否则 core 会立即退出）
+    try:
+        qf = os.path.join(DIST, "state", "quit.flag")
+        if os.path.exists(qf):
+            os.remove(qf)
+    except OSError:
+        pass
     fg = os.path.join(DIST, "fileguard.exe")
     if os.path.exists(fg):
         _spawn([fg])
@@ -178,6 +185,12 @@ def cmd_uninstall(args):
 
 def cmd_dev(args):
     from share import paths
+    try:
+        qf = os.path.join(paths.state_dir(), "quit.flag")
+        if os.path.exists(qf):
+            os.remove(qf)
+    except OSError:
+        pass
     fg = os.path.join(DIST, "fileguard.exe")
     if os.path.exists(fg):
         _spawn([fg])

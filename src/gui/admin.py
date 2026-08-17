@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -111,7 +112,16 @@ def _ring_running() -> bool:
 
 
 def _start_ring():
-    """启动 fileguard + core（守望者会自动补全）。"""
+    """启动 fileguard + core（守望者会自动补全）。
+
+    显式启动 = 撤销之前的退出意图：清除残留的 quit.flag，
+    否则刚退出过（标记仍新鲜）时 core 一启动就会立即退出。
+    """
+    try:
+        if os.path.exists(paths.quit_flag_path()):
+            os.remove(paths.quit_flag_path())
+    except OSError:
+        pass
     try:
         fg = os.path.join(paths.app_root(), "fileguard.exe")
         if os.path.exists(fg):
@@ -119,6 +129,15 @@ def _start_ring():
         util.spawn_service("core")
     except Exception as e:
         logger.error(f"启动保护环失败: {e}")
+
+
+def _cleanup_quit_flag():
+    """退出流程收尾：等所有进程退出后清除退出标记，避免下次启动被旧标记挡住。"""
+    time.sleep(10)
+    try:
+        os.remove(paths.quit_flag_path())
+    except OSError:
+        pass
 
 
 def _quit_mode():
@@ -147,6 +166,7 @@ def _quit_mode():
         def submit():
             if policy.password_ok(policy.load(), entry.get()):
                 util.write_quit_flag()
+                threading.Thread(target=_cleanup_quit_flag, daemon=True).start()
                 top.destroy()
             else:
                 entry.delete(0, "end")

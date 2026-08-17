@@ -1,13 +1,19 @@
 {
-  "_说明": "家长密码(parent_password_hash)为空时限制不生效，请先用 admin.exe 设置密码。配额单位：分钟。",
   "version": 1,
-  "parent_password_hash": "",
-  "daily_quota": { "weekday": 120, "weekend": 240 },
-  "forbidden_windows": [ { "start": "22:30", "end": "07:30" } ],
+  "parent_password_hash": "9af15b336e6a9619928537df30b2e6a2376569fcf9d7e773eccede65606529a0",
+  "daily_quota": {
+    "weekday": 999,
+    "weekend": 999
+  },
+  "forbidden_windows": [],
   "enforce_action": "lock",
   "kill_processes": [],
   "remind_minutes": 5,
   "extra_minutes_per_unlock": 30,
   "tamper_penalty_minutes": 60,
-  "check_interval_seconds": 5
+  "check_interval_seconds": 5,
+  "system_restrictions": [
+    "disable_run"
+  ],
+  "mac": "60d5bb5055e8265ea50c11af01af602859165398819ec43cc2b517b50b9af12d"
 }
