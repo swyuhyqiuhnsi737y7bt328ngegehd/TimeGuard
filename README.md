@@ -64,6 +64,7 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 | 守望 | src/guard/watchdog.py | 进程互守、随机名副本、拉起服务 | guardian.exe（安装时复制成随机名 x3） |
 | 锁定 | src/lock/lockscreen.py | 全屏锁定界面、密码解锁加时 | lockscreen.exe |
 | 管理 | src/gui/admin.py | 家长设置界面、立即锁定、卸载 | admin.exe |
+| 系统限制 | src/share/policies.py | 系统功能限制（禁任务管理器/注册表/CMD/运行/控制面板/自动运行） | 随包 |
 | 文件自锁 | src/protect/fileguard.c | C 程序：目录文件句柄占用 + 拉起 core | fileguard.exe |
 | 配置 | config/policy.json | 策略（家长密码为空时限制不生效） | 复制到 dist |
 | 运行状态 | state/ | usage.json、lock.flag、守护注册、日志 | 运行时生成 |
@@ -130,6 +131,7 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 | extra_minutes_per_unlock | 密码解锁一次加时分钟数 |
 | tamper_penalty_minutes | 检测到系统时间回拨时从额度中扣减的分钟数 |
 | check_interval_seconds | 策略检查间隔（默认 5 秒） |
+| system_restrictions | 系统功能限制列表（admin 勾选）：禁用任务管理器/注册表编辑器/命令提示符/运行/控制面板/移动存储自动运行，通过 HKCU 组策略实现，仅对当前账户生效，卸载时自动清理 |
 
 ## 六、测试
 

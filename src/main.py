@@ -141,6 +141,12 @@ def cmd_uninstall(args):
         winreg.CloseKey(k)
     except Exception:
         pass
+    # 清除系统功能限制（不残留限制策略）
+    try:
+        from share import policies as _pol
+        _pol.clear_all()
+    except Exception:
+        pass
     # 确认进程全部停止后，才清理退出标记（防止残留进程因标记消失而复活）
     try:
         os.remove(qf)

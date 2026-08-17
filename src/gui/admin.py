@@ -213,6 +213,12 @@ def _uninstall(root):
         configmac.remove_all()
     except Exception:
         pass
+    # 清除系统功能限制（不残留限制策略）
+    try:
+        from share import policies as _pol
+        _pol.clear_all()
+    except Exception:
+        pass
     # 确认进程全部停止后，才清理退出标记（防止残留进程因标记消失而复活互相拉起）
     try:
         os.remove(paths.quit_flag_path())
@@ -262,7 +268,7 @@ def main():
     cfg = policy.load()
     root = tk.Tk()
     root.title("TimeGuard 家长控制")
-    root.geometry("620x760")
+    root.geometry("620x880")
     root.configure(bg="#f5f6fa")
     if not _ask_password(root, cfg):
         root.destroy()
@@ -335,6 +341,23 @@ def main():
     ttk.Label(frm, text="改时间惩罚（分钟）:").grid(row=r, column=0, sticky="w", **pad)
     ttk.Spinbox(frm, from_=0, to=600, textvariable=pen, width=6).grid(row=r, column=1, sticky="w", **pad)
 
+    # 系统功能限制
+    r += 1
+    lf = ttk.LabelFrame(frm, text="系统功能限制（仅当前 Windows 账户，勾选后保存立即生效）")
+    lf.grid(row=r, column=0, columnspan=5, sticky="we", padx=12, pady=6)
+    from share import policies as _pol
+    restr_keys = list(_pol.RESTRICTIONS.keys())
+    restr_vars = {}
+    for i, key in enumerate(restr_keys):
+        var = tk.BooleanVar(value=key in (cfg.get("system_restrictions", []) or []))
+        ttk.Checkbutton(lf, text=_pol.display_name(key), variable=var).grid(
+            row=i // 3, column=i % 3, sticky="w", padx=10, pady=4)
+        restr_vars[key] = var
+    ttk.Label(lf, text="提示：禁用命令提示符/注册表编辑器后，构建脚本(bat)与 regedit 也会被禁，需取消勾选后恢复。",
+              font=("Microsoft YaHei", 8), foreground="#888").grid(
+        row=(len(restr_keys) + 2) // 3, column=0, columnspan=3, sticky="w",
+        padx=10, pady=(2, 6))
+
     # 按钮
     r += 1
     btns = ttk.Frame(frm)
@@ -353,11 +376,17 @@ def main():
         ncfg["remind_minutes"] = max(0, remind.get())
         ncfg["extra_minutes_per_unlock"] = max(5, extra.get())
         ncfg["tamper_penalty_minutes"] = max(0, pen.get())
+        ncfg["system_restrictions"] = [k for k, v in restr_vars.items() if v.get()]
         try:
             _save_policy(ncfg)
         except Exception as e:
             messagebox.showerror("TimeGuard", f"保存失败：{e}", parent=root)
             return
+        # 立即应用系统限制（不等控制器轮询）
+        try:
+            _pol.apply_restrictions(ncfg.get("system_restrictions", []))
+        except Exception:
+            pass
         if not _ring_running():
             if messagebox.askyesno("TimeGuard",
                                    "主控程序（core）未在运行，时间限制不会生效。\n是否立即启动？",

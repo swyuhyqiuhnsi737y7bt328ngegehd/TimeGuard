@@ -114,6 +114,25 @@ def _ensure_protection():
     watchdog.ensure_guardians()
 
 
+_last_restr = None
+_last_restr_ts = 0.0
+
+
+def _apply_system_restrictions(cfg):
+    """按策略应用/重施加系统功能限制（孩子改注册表也会被周期性纠正，10 分钟一次）。"""
+    global _last_restr, _last_restr_ts
+    try:
+        from share import policies
+        restr = tuple(sorted(cfg.get("system_restrictions", []) or []))
+        now = time.time()
+        if restr != _last_restr or now - _last_restr_ts > 600:
+            policies.apply_restrictions(restr)
+            _last_restr = restr
+            _last_restr_ts = now
+    except Exception as e:
+        logger.error(f"应用系统限制失败: {e}")
+
+
 def _ensure_autostart():
     """自愈开机自启动：注册表 HKCU Run 指向自己（core.exe）。
 
@@ -176,7 +195,9 @@ def main():
                 cfg = policy.load()
                 last_policy_mtime = mtime
                 interval = max(2, int(cfg.get("check_interval_seconds", 5)))
-            # 未设置家长密码：不执行任何限制
+            # 系统功能限制：独立于家长密码，始终应用
+            _apply_system_restrictions(cfg)
+            # 未设置家长密码：不执行时间限制
             if not cfg.get("parent_password_hash"):
                 if not st["warned_no_pwd"]:
                     logger.warn("未设置家长密码，限制功能未启用（请用 admin.exe 设置）")
