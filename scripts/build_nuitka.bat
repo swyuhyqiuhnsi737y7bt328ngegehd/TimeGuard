@@ -13,7 +13,12 @@ taskkill /F /IM lockscreen.exe >nul 2>&1
 taskkill /F /IM guardian.exe >nul 2>&1
 taskkill /F /IM fileguard.exe >nul 2>&1
 ping -n 4 127.0.0.1 >nul
-rmdir /s /q dist\state >nul 2>&1
+@rem clean state but PRESERVE config.key (MAC key) and policy.bak (signed backup)
+if exist dist\state (
+  del /q dist\state\quit.flag dist\state\core.pid dist\state\lockscreen.pid dist\state\fileguard.pid dist\state\spawn_lock dist\state\installed.flag 2>nul
+  del /q dist\state\guard_*.json dist\state\usage.json 2>nul
+  if exist dist\state\logs rd /s /q dist\state\logs 2>nul
+)
 @rem ===== end stop block =====
 
 echo [1/6] Installing build deps (nuitka zstandard pystray pillow) ...

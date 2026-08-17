@@ -225,13 +225,39 @@ def cmd_hashpwd(args):
 
 
 def cmd_resetpw(args):
-    target = os.path.join(DIST if args.target == "dist" else ROOT, "config", "policy.json")
+    from share import configmac as _cm
+    if args.target == "dist":
+        target = os.path.join(DIST, "config", "policy.json")
+        state_dir = os.path.join(DIST, "state")
+    else:
+        target = os.path.join(ROOT, "config", "policy.json")
+        state_dir = os.path.join(ROOT, "state")
     try:
         with open(target, encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception:
         cfg = {}
     cfg["parent_password_hash"] = ""
+    # 若已启用完整性保护，必须用对应密钥重新签名，
+    # 否则写出的无签名配置会被当成“外部篡改”自动恢复，密码重置会失败
+    key = None
+    try:
+        kf = os.path.join(state_dir, "config.key")
+        if os.path.exists(kf):
+            with open(kf, encoding="utf-8") as f:
+                key = f.read().strip()
+    except Exception:
+        key = None
+    if not key:
+        try:
+            import winreg
+            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\TimeGuard")
+            key = winreg.QueryValueEx(k, "MacKey")[0]
+            winreg.CloseKey(k)
+        except Exception:
+            key = None
+    if key:
+        cfg = _cm.sign(cfg, key)
     with open(target, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     print(f"已清空密码（{target}）。请用 admin.exe 重新设置。")

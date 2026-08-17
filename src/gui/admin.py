@@ -33,6 +33,10 @@ def _prompt_password(root, title, prompt):
     dlg.title(title)
     dlg.attributes("-topmost", True)
     dlg.configure(bg="#f5f6fa")
+    try:
+        root.update_idletasks()  # 确保主窗口尺寸已计算，避免对话框位置错乱
+    except Exception:
+        pass
     w, h = 380, 190
     x = root.winfo_rootx() + max(0, (root.winfo_width() - w) // 2)
     y = root.winfo_rooty() + max(0, (root.winfo_height() - h) // 2)

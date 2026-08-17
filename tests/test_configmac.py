@@ -15,6 +15,12 @@ def main():
     orig_state = paths.state_dir
     paths.policy_path = lambda: os.path.join(tmp, "policy.json")
     paths.state_dir = lambda: tmp
+    # 隔离注册表：测试不读写真实 HKCU\Software\TimeGuard
+    reg = {}
+    orig_reg_get = configmac._reg_get
+    orig_reg_set = configmac._reg_set
+    configmac._reg_get = lambda n: reg.get(n)
+    configmac._reg_set = lambda n, v: reg.update({n: v})
     try:
         base_cfg = {"parent_password_hash": "abc123hash",
                     "daily_quota": {"weekday": 120, "weekend": 240}}
@@ -69,13 +75,13 @@ def main():
         c = P.load()
         assert c["parent_password_hash"] == "abc123hash", c
         print("PASS: 备份文件被删后从注册表备份恢复")
-        # 清理
-        configmac.remove_all()
         print("configmac 测试全部通过")
         return 0
     finally:
         paths.policy_path = orig_policy
         paths.state_dir = orig_state
+        configmac._reg_get = orig_reg_get
+        configmac._reg_set = orig_reg_set
 
 
 if __name__ == "__main__":
