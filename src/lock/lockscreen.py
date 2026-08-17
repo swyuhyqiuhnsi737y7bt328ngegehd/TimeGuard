@@ -121,6 +121,13 @@ def main():
         if util.launched_by_user():
             util.notify_ui("TimeGuard", "锁屏服务已在运行（无需重复启动）。")
         return
+    if util.launched_by_user():
+        # 用户直接双击启动：清除可能残留的退出标记
+        try:
+            if os.path.exists(paths.quit_flag_path()):
+                os.remove(paths.quit_flag_path())
+        except OSError:
+            pass
     util.write_text(paths.service_pid_path("lockscreen"), str(os.getpid()))
     logger.info(f"lockscreen 启动 pid={os.getpid()}")
     try:

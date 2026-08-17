@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import traceback
 from tkinter import messagebox, ttk
 
 from core import policy
@@ -81,16 +82,55 @@ def _prompt_password(root, title, prompt):
     return result["val"]
 
 
-def _ask_password(root, cfg) -> bool:
+def _ask_password_standalone(cfg) -> bool:
+    """家长验证：独立根窗口（在主窗口创建之前执行）。
+
+    不使用 transient/从属窗口——主窗口尚不存在时，从属对话框会被隐藏导致挂死。
+    """
     if not cfg.get("parent_password_hash"):
         return True
-    pwd = _prompt_password(root, "家长验证", "请输入家长密码：")
-    if pwd is None:
-        return False
-    if policy.password_ok(cfg, pwd):
-        return True
-    messagebox.showerror("TimeGuard", "密码错误", parent=root)
-    return False
+    top = tk.Tk()
+    top.title("家长验证")
+    top.attributes("-topmost", True)
+    top.configure(bg="#f5f6fa")
+    w, h = 380, 190
+    sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
+    top.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2)}")
+    top.resizable(False, False)
+    result = {"val": None}
+    tk.Label(top, text="请输入家长密码：", font=("Microsoft YaHei", 10), bg="#f5f6fa",
+             fg="#333", justify="left").pack(padx=18, pady=(16, 8))
+    entry = tk.Entry(top, show="*", font=("Microsoft YaHei", 12), width=24)
+    entry.pack(padx=18, pady=6)
+    err = tk.Label(top, text="", font=("Microsoft YaHei", 9), fg="#c33", bg="#f5f6fa")
+    err.pack()
+
+    def ok():
+        pwd = entry.get()
+        if policy.password_ok(cfg, pwd):
+            result["val"] = pwd
+            top.destroy()
+        else:
+            entry.delete(0, "end")
+            err.configure(text="密码错误")
+
+    def cc():
+        top.destroy()
+
+    btns = tk.Frame(top, bg="#f5f6fa")
+    btns.pack(pady=8)
+    tk.Button(btns, text="确定", width=8, command=ok).pack(side="left", padx=8)
+    tk.Button(btns, text="取消", width=8, command=cc).pack(side="left", padx=8)
+    top.bind("<Return>", lambda e: ok())
+    top.bind("<Escape>", lambda e: cc())
+    top.protocol("WM_DELETE_WINDOW", cc)
+    try:
+        top.grab_set()
+    except Exception:
+        pass
+    entry.focus_set()
+    top.mainloop()
+    return result["val"] is not None
 
 
 def _set_password(root, cfg):
@@ -280,6 +320,15 @@ def _uninstall(root):
 
 
 def main():
+    """入口：任何异常都会写入日志（state/logs/app.log），便于定位启动问题。"""
+    try:
+        _main()
+    except Exception:
+        logger.error("admin 异常退出:\n" + traceback.format_exc())
+        raise
+
+
+def _main():
     if "--quit" in sys.argv:
         _quit_mode()
         return
@@ -289,13 +338,20 @@ def main():
         util.notify_ui("TimeGuard", "管理界面已在运行（已为你切换到已打开的窗口）。")
         return
     # 配置被篡改时 policy.load() 会自动恢复并写日志，不再弹阻塞式警告框
+    logger.info("admin 启动: 加载策略")
     cfg = policy.load()
+    logger.info("admin 启动: 策略加载完成")
+    # 家长验证：独立窗口，先于主窗口（无白屏、无从属窗口挂死问题）
+    if not _ask_password_standalone(cfg):
+        logger.info("admin 启动: 家长验证未通过/取消，退出")
+        return
+    logger.info("admin 启动: 家长验证通过")
     root = tk.Tk()
+    logger.info("admin 启动: 主窗口创建完成")
     root.title("TimeGuard 家长控制")
     root.geometry("620x880")
     root.configure(bg="#f5f6fa")
-    # 先隐藏主窗口：通过家长验证后才显示，避免出现空白窗口（“白屏”）
-    root.withdraw()
+    root.withdraw()  # 构建期间隐藏，构建完立即显示（防白屏）
 
     pad = {"padx": 12, "pady": 6}
     frm = ttk.Frame(root)
@@ -445,10 +501,7 @@ def main():
     ttk.Button(btns, text="修改密码", command=change_pwd).pack(side="left", padx=6)
     ttk.Button(btns, text="卸载并退出", command=lambda: _uninstall(root)).pack(side="left", padx=6)
 
-    # 家长验证：通过后才显示主窗口（避免验证前出现空白窗口）
-    if not _ask_password(root, cfg):
-        root.destroy()
-        return
+    logger.info("admin 启动: 表单构建完成")
 
     # 首次使用：提示设置密码，但不强制（取消也能继续浏览设置）
     if not cfg.get("parent_password_hash"):
@@ -457,6 +510,7 @@ def main():
                             "点击下方“修改密码”按钮即可设置。", parent=root)
 
     root.deiconify()
+    logger.info("admin 启动: 主窗口已显示")
     root.mainloop()
     logger.info("admin 退出")
 

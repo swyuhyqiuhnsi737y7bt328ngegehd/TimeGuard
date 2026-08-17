@@ -162,6 +162,14 @@ def main():
         if util.launched_by_user():
             util.notify_ui("TimeGuard", "主控程序已在运行（请看任务栏托盘图标）。")
         return
+    if util.launched_by_user():
+        # 用户直接双击启动：清除可能残留的退出标记（显式启动 = 撤销退出意图），
+        # 否则刚退出过（标记仍新鲜）时 core 会立即退出（“闪退”）
+        try:
+            if os.path.exists(paths.quit_flag_path()):
+                os.remove(paths.quit_flag_path())
+        except OSError:
+            pass
     util.write_text(paths.service_pid_path("core"), str(os.getpid()))
     if paths.is_frozen():
         util.write_text(os.path.join(paths.state_dir(), "installed.flag"), "1")
