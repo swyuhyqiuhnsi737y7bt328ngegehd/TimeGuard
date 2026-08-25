@@ -19,8 +19,8 @@ DEFAULTS = {
     "extra_minutes_per_unlock": 30,        # 家长密码解锁一次增加的分钟数
     "tamper_penalty_minutes": 60,          # 检测到改时间回拨的惩罚（加到已用时长）
     "check_interval_seconds": 5,
-    "restriction_reapply_seconds": 60,       # 系统限制重施加周期（秒，防孩子改回注册表）
-    "system_restrictions": [],               # 系统功能限制项（见 share/policies.py）
+    "restriction_poll_seconds": 1,          # 系统限制执行器轮询周期（秒，进程级拦截/Win+R 钩子）
+    "system_restrictions": [],               # 系统功能限制项（见 share/restrictor.py）
 }
 
 _last_good = None

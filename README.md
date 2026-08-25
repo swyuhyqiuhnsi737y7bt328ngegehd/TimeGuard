@@ -64,7 +64,7 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 | 守望 | src/guard/watchdog.py | 进程互守、随机名副本、拉起服务 | guardian.exe（安装时复制成随机名 x3） |
 | 锁定 | src/lock/lockscreen.py | 全屏锁定界面、密码解锁加时 | lockscreen.exe |
 | 管理 | src/gui/admin.py | 家长设置界面、立即锁定、卸载 | admin.exe |
-| 系统限制 | src/share/policies.py | 系统功能限制（禁任务管理器/注册表/CMD+bat/运行/控制面板/自动运行；写入失败可见、可自检诊断、只清理本程序写入的值） | 随包 |
+| 系统限制 | src/share/restrictor.py | 系统功能限制（进程级拦截 + Win+R 钩子，不依赖注册表：禁任务管理器/注册表/CMD+PowerShell+终端/运行/控制面板与设置） | 随包 |
 | 文件自锁 | src/protect/fileguard.c | C 程序：目录文件句柄占用 + 拉起 core | fileguard.exe |
 | 配置 | config/policy.json | 策略（家长密码为空时限制不生效） | 复制到 dist |
 | 运行状态 | state/ | usage.json、lock.flag、守护注册、日志 | 运行时生成 |
@@ -131,23 +131,24 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 | extra_minutes_per_unlock | 密码解锁一次加时分钟数 |
 | tamper_penalty_minutes | 检测到系统时间回拨时从额度中扣减的分钟数 |
 | check_interval_seconds | 策略检查间隔（默认 5 秒） |
-| system_restrictions | 系统功能限制列表（admin 勾选）：禁用任务管理器/注册表编辑器/命令提示符(cmd+bat)/运行/控制面板/移动存储自动运行，通过 HKCU 组策略实现，仅对当前账户生效；卸载时只恢复本程序写入的值（保留用户原有设置）。注意：PowerShell 不受 DisableCMD 策略限制；若被 360 等安全软件拦截写入，admin 会弹出提示 |
-| restriction_reapply_seconds | 系统限制重施加周期（秒，默认 60）：core 周期校正被孩子改回的注册表限制值 |
+| system_restrictions | 系统功能限制列表（admin 勾选）：禁用任务管理器/注册表编辑器/命令提示符+PowerShell+Windows 终端/运行(Win+R)/控制面板与设置(Win+I)。由 core 的限制执行器实施：进程级拦截（1~2 秒内结束被禁程序）+ Win+R 键盘钩子，不依赖注册表，仅 core 运行期间生效，卸载即消失 |
+| restriction_poll_seconds | 限制执行器轮询周期（秒，默认 1）：core 每周期枚举进程并结束被禁程序的实例 |
 
 ## 六、测试
 
     python tests/smoke_test.py        # 逻辑冒烟（策略/密码/随机名）
     python tests/test_filelock.py     # 文件锁：删除/改名被拒、可写入、释放后可删
     python tests/integration_test.py  # 守望互拉：杀一个守望者，自动补位
-    python tests/test_policies.py --real   # 系统限制真实键自检（写入标记值并清理；被安全软件拦截时如实报错）
+    python tests/test_restrictor.py --real   # 限制执行器测试（进程拦截链路 + Win+R 钩子安装/卸载）
 
 已在 Windows + Python 3.12 验证通过：单元冒烟 4 项、文件锁 4 项、集成互拉 4 项全过；fileguard.exe（Cygwin gcc 14 编译）实测锁定行为正确。
 
 ## 七、已知限制
-- 系统功能限制依赖 HKCU 组策略写入：360 安全卫士等软件的“注册表防护”可能拦截写入，
-  admin 保存时会提示，可用“自检限制是否生效”诊断；
-- DisableCMD 无法限制 PowerShell / Windows Terminal（系统策略本身不支持，属 Windows 局限）；
-- NoRun / 控制面板限制在重启资源管理器（或重新登录）后完全生效；
+- 系统功能限制由主控进程（core）实施：core 未运行时限制不生效（卸载后即完全消失，
+  无注册表残留）；改名复制的被禁程序（如 cmd.exe 复制为 x.exe）无法识别；
+  管理员权限的同类进程无法被普通权限结束（孩子无管理员权限，影响有限）；
+- 早期的注册表组策略方案已弃用（360 等安全软件会拦截 Policies 键写入、DisableCMD
+  挡不住 PowerShell、卸载易误删用户原有策略值），卸载仍会清理旧版本残留；
 - 互守是笨方法：管理员同时结束所有进程 + 删除文件仍可解除（本就不是 rootkit）；
 - 锁定界面基于 tkinter 全屏置顶，仅覆盖主显示器；鼠标被限制在主屏内，副屏不可操作；
 - Ctrl+Alt+Del 无法被用户态程序屏蔽（系统安全注意序列）；

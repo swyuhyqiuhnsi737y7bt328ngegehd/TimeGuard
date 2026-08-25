@@ -416,31 +416,22 @@ def _main():
     ttk.Label(frm, text="改时间惩罚（分钟）:").grid(row=r, column=0, sticky="w", **pad)
     ttk.Spinbox(frm, from_=0, to=600, textvariable=pen, width=6).grid(row=r, column=1, sticky="w", **pad)
 
-    # 系统功能限制
+    # 系统功能限制（进程级拦截 + Win+R 钩子，不依赖注册表）
     r += 1
-    lf = ttk.LabelFrame(frm, text="系统功能限制（仅当前 Windows 账户，勾选后保存立即生效）")
+    lf = ttk.LabelFrame(frm, text="系统功能限制（勾选后保存，由主控进程 1~2 秒内实施）")
     lf.grid(row=r, column=0, columnspan=5, sticky="we", padx=12, pady=6)
-    from share import policies as _pol
-    restr_keys = list(_pol.RESTRICTIONS.keys())
+    from share import restrictor as _restr
+    restr_keys = list(_restr.RESTRICTIONS.keys())
     restr_vars = {}
     for i, key in enumerate(restr_keys):
         var = tk.BooleanVar(value=key in (cfg.get("system_restrictions", []) or []))
-        ttk.Checkbutton(lf, text=_pol.display_name(key), variable=var).grid(
+        ttk.Checkbutton(lf, text=_restr.display_name(key), variable=var).grid(
             row=i // 3, column=i % 3, sticky="w", padx=10, pady=4)
         restr_vars[key] = var
-    ttk.Label(lf, text="提示：禁用命令提示符会同时禁 cmd 与 bat 脚本（PowerShell 不受此策略限制）；\nNoRun/控制面板项需重启资源管理器后完全生效。若保存时提示写入失败，多为 360 等安全软件拦截注册表。",
+    ttk.Label(lf, text="提示：限制由主控进程（core）直接强制实施：被禁程序启动后 1~2 秒内会被自动结束，\n无需注册表、不受安全软件拦截、卸载即完全消失。请保持 core 运行；改名复制的程序无法识别。",
               font=("Microsoft YaHei", 8), foreground="#888").grid(
         row=(len(restr_keys) + 2) // 3, column=0, columnspan=3, sticky="w",
         padx=10, pady=(2, 6))
-
-    def _restrictions_selftest():
-        ok, msg = _pol.selftest()
-        messagebox.showinfo("系统限制自检" if ok else "系统限制自检（发现问题）",
-                            msg, parent=root)
-
-    ttk.Button(lf, text="自检限制是否生效", command=_restrictions_selftest).grid(
-        row=(len(restr_keys) + 3) // 3, column=0, columnspan=3, sticky="w",
-        padx=10, pady=(0, 6))
 
     # 按钮
     r += 1
@@ -466,21 +457,7 @@ def _main():
         except Exception as e:
             messagebox.showerror("TimeGuard", f"保存失败：{e}", parent=root)
             return
-        # 立即应用系统限制（不等控制器轮询）；失败必须让家长知道原因
-        try:
-            failed = _pol.apply_restrictions(ncfg.get("system_restrictions", []))
-            if failed:
-                names = "、".join(_pol.display_name(k) for k in failed)
-                logger.warn(f"系统限制写入注册表失败: {failed}")
-                messagebox.showwarning(
-                    "TimeGuard",
-                    "以下系统限制未能写入注册表（可能被安全软件拦截）：\n" + names +
-                    "\n\n请检查 360 安全卫士等软件的“注册表防护/主动防御”是否拦截了对\n"
-                    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies 的写入，\n"
-                    "关闭防护或加入白名单后重新保存。\n\n可点“自检限制是否生效”复查。",
-                    parent=root)
-        except Exception as e:
-            logger.error(f"应用系统限制异常: {traceback.format_exc()}")
+        # 系统限制无需立即应用：由主控进程（core）的限制执行器按策略实时实施
         if not _ring_running():
             if messagebox.askyesno("TimeGuard",
                                    "主控程序（core）未在运行，时间限制不会生效。\n是否立即启动？",

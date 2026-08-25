@@ -230,3 +230,66 @@ def stop_keyboard_block():
 
 def hook_active() -> bool:
     return bool(_hook)
+
+
+# ---------------- 运行对话框(Win+R)拦截 ----------------
+# 独立钩子（与锁屏钩子互不影响）：限制禁用“运行”时由 core 安装。
+
+_run_hook = None
+_run_pump_tid = 0
+_run_cb_ref = None
+VK_R = 0x52
+
+
+def _run_hook_proc(nCode, wParam, lParam):
+    if nCode == HC_ACTION and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+        ks = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+        if int(ks.vkCode) == VK_R:
+            win = (_user32.GetAsyncKeyState(VK_LWIN) |
+                   _user32.GetAsyncKeyState(VK_RWIN)) & 0x8000
+            if win:
+                return 1  # 吞掉 Win+R 的 R 键，阻止打开运行对话框
+    return _user32.CallNextHookEx(_run_hook, nCode, wParam, lParam)
+
+
+def block_run_hotkey(on: bool) -> bool:
+    """启用/停用 Win+R 运行对话框拦截。钩子与消息泵同在泵线程，回调在其中执行。"""
+    global _run_hook, _run_pump_tid, _run_cb_ref
+    if on:
+        if _run_hook:
+            return True
+        _run_cb_ref = HOOKPROC(_run_hook_proc)
+        ready = threading.Event()
+        result = {}
+
+        def worker():
+            global _run_hook, _run_pump_tid
+            _run_pump_tid = int(_k32.GetCurrentThreadId())
+            h = _user32.SetWindowsHookExW(WH_KEYBOARD_LL, _run_cb_ref, None, 0)
+            result["hook"] = h
+            ready.set()
+            if not h:
+                return
+            msg = wintypes.MSG()
+            while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                _user32.TranslateMessage(ctypes.byref(msg))
+                _user32.DispatchMessageW(ctypes.byref(msg))
+
+        t = threading.Thread(target=worker, daemon=True, name="runblock-pump")
+        t.start()
+        ready.wait(3)
+        _run_hook = result.get("hook")
+        return bool(_run_hook)
+    # 停用
+    if _run_hook:
+        _user32.UnhookWindowsHookEx(_run_hook)
+        _run_hook = None
+    if _run_pump_tid:
+        _user32.PostThreadMessageW(_run_pump_tid, 0x0012, 0, 0)  # WM_QUIT
+        _run_pump_tid = 0
+    return True
+
+
+def run_hook_active() -> bool:
+    return bool(_run_hook)
+

@@ -131,6 +131,32 @@ def find_pid_by_name(basename: str) -> int:
         _k32.CloseHandle(snap)
 
 
+def find_pids_by_name(basename: str) -> list:
+    """按镜像文件名（如 taskmgr.exe）返回所有匹配的 pid 列表（大小写不敏感）。
+
+    用于系统功能限制：结束被禁程序的全部实例。
+    """
+    target = str(basename).lower()
+    out = []
+    TH32CS_SNAPPROCESS = 0x2
+    snap = _k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == -1 or snap == (1 << 64) - 1:
+        return out
+    try:
+        pe = _PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        if not _k32.Process32FirstW(snap, ctypes.byref(pe)):
+            return out
+        while True:
+            if pe.szExeFile.lower() == target:
+                out.append(int(pe.th32ProcessID))
+            if not _k32.Process32NextW(snap, ctypes.byref(pe)):
+                break
+    finally:
+        _k32.CloseHandle(snap)
+    return out
+
+
 def processes_under(root_dir: str):
     """返回可执行文件位于 root_dir 下的所有 (pid, exe_path)。
 
@@ -159,13 +185,17 @@ def processes_under(root_dir: str):
 
 
 def kill_pids(pids):
-    """按 PID 结束进程（含子进程树）。"""
+    """按 PID 结束进程（含子进程树）。返回成功结束的数量。"""
+    ok = 0
     for pid in pids:
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                           capture_output=True, timeout=10)
+            r = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                               capture_output=True, timeout=10)
+            if r.returncode == 0:
+                ok += 1
         except Exception:
             pass
+    return ok
 
 
 def spawn(cmd, env=None, cwd=None):

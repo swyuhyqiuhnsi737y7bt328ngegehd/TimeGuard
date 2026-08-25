@@ -10,6 +10,6 @@
   "extra_minutes_per_unlock": 30,
   "tamper_penalty_minutes": 60,
   "check_interval_seconds": 5,
-  "restriction_reapply_seconds": 60,
+  "restriction_poll_seconds": 1,
   "system_restrictions": []
 }

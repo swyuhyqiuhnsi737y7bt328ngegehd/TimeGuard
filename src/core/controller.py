@@ -114,34 +114,38 @@ def _ensure_protection():
     watchdog.ensure_guardians()
 
 
-_last_restr = None
-_last_restr_ts = 0.0
+_live_cfg = {}          # 主循环重载后更新，限制执行器线程读取（避免线程内反复读盘验签）
+_restrictor = None     # share.restrictor.Restrictor：进程拦截 + Win+R 钩子
 
 
-def _apply_system_restrictions(cfg):
-    """按策略应用/重施加系统功能限制（孩子改注册表也会被周期性纠正）。
-
-    重施加周期可配置（restriction_reapply_seconds，默认 60 秒）；
-    写入失败（如被 360 注册表防护拦截）会记录日志并上报失败项。
-    """
-    global _last_restr, _last_restr_ts
-    try:
-        from share import policies
-        restr = tuple(sorted(cfg.get("system_restrictions", []) or []))
+def _update_live_cfg(cfg):
+    """主循环每次加载/重载策略后调用：同步给限制执行器并确保其已启动。"""
+    global _live_cfg, _restrictor
+    _live_cfg = dict(cfg)
+    if _restrictor is None:
         try:
-            interval = max(10, int(cfg.get("restriction_reapply_seconds", 60) or 60))
-        except (TypeError, ValueError):
-            interval = 60
-        now = time.time()
-        if restr != _last_restr or now - _last_restr_ts > interval:
-            failed = policies.apply_restrictions(restr)
-            _last_restr = restr
-            _last_restr_ts = now
-            if failed:
-                names = "、".join(policies.display_name(k) for k in failed)
-                logger.error(f"系统限制写入注册表失败（可能被安全软件拦截）: {names}")
-    except Exception as e:
-        logger.error(f"应用系统限制失败: {e}")
+            from share import restrictor
+            try:
+                poll = max(0.5, float(cfg.get("restriction_poll_seconds", 1) or 1))
+            except (TypeError, ValueError):
+                poll = 1.0
+            _restrictor = restrictor.Restrictor(
+                lambda: _live_cfg.get("system_restrictions", []) or [],
+                poll_seconds=poll)
+            _restrictor.start()
+            logger.info(f"系统功能限制执行器已启动（轮询 {poll}s）：进程拦截 + Win+R 钩子")
+        except Exception as e:
+            logger.error(f"启动系统限制执行器失败: {e}")
+
+
+def _stop_restrictor():
+    global _restrictor
+    if _restrictor is not None:
+        try:
+            _restrictor.stop()
+        except Exception:
+            pass
+        _restrictor = None
 
 
 def _ensure_autostart():
@@ -198,6 +202,7 @@ def main():
     _ensure_protection()
     start_tray()
     cfg = policy.load()
+    _update_live_cfg(cfg)  # 系统功能限制执行器（不依赖注册表，core 存活期间生效）
     interval = max(2, int(cfg.get("check_interval_seconds", 5)))
     last_ts = time.time()
     last_policy_mtime = -1
@@ -207,6 +212,11 @@ def main():
         if util.quit_flag_active():
             logger.info("core 收到退出指令")
             break
+        if _restrictor is not None and not _restrictor.is_alive():
+            # 执行器意外退出则重建（防自愈失效）
+            logger.warn("限制执行器线程已退出，正在重启")
+            _restrictor = None
+            _update_live_cfg(_live_cfg)
         try:
             # 策略热加载
             mtime = os.path.getmtime(paths.policy_path()) if os.path.exists(paths.policy_path()) else -1
@@ -214,8 +224,8 @@ def main():
                 cfg = policy.load()
                 last_policy_mtime = mtime
                 interval = max(2, int(cfg.get("check_interval_seconds", 5)))
-            # 系统功能限制：独立于家长密码，始终应用
-            _apply_system_restrictions(cfg)
+            # 系统功能限制：独立于家长密码，始终由限制执行器线程实施
+            _update_live_cfg(cfg)
             # 未设置家长密码：不执行时间限制
             if not cfg.get("parent_password_hash"):
                 if not st["warned_no_pwd"]:
@@ -274,6 +284,7 @@ def main():
         except Exception as e:
             logger.error(f"主循环异常: {e}")
         time.sleep(interval)
+    _stop_restrictor()   # 停限制执行器（退出时自动卸载 Win+R 钩子）
     locker.release()
     logger.info("core 退出")
 
