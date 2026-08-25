@@ -148,12 +148,14 @@ def cmd_uninstall(args):
         winreg.CloseKey(k)
     except Exception:
         pass
-    # 清除系统功能限制（不残留限制策略）
+    # 清除系统功能限制（不残留限制策略；只恢复本程序写入的值）
     try:
         from share import policies as _pol
-        _pol.clear_all()
-    except Exception:
-        pass
+        failed = _pol.clear_all()
+        if failed:
+            print("[警告] 系统限制清理失败（可能被安全软件拦截）:", failed)
+    except Exception as e:
+        print("[警告] 系统限制清理异常:", e)
     # 确认进程全部停止后，才清理退出标记（防止残留进程因标记消失而复活）
     try:
         os.remove(qf)

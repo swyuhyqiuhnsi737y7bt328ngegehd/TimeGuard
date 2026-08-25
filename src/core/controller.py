@@ -119,16 +119,27 @@ _last_restr_ts = 0.0
 
 
 def _apply_system_restrictions(cfg):
-    """按策略应用/重施加系统功能限制（孩子改注册表也会被周期性纠正，10 分钟一次）。"""
+    """按策略应用/重施加系统功能限制（孩子改注册表也会被周期性纠正）。
+
+    重施加周期可配置（restriction_reapply_seconds，默认 60 秒）；
+    写入失败（如被 360 注册表防护拦截）会记录日志并上报失败项。
+    """
     global _last_restr, _last_restr_ts
     try:
         from share import policies
         restr = tuple(sorted(cfg.get("system_restrictions", []) or []))
+        try:
+            interval = max(10, int(cfg.get("restriction_reapply_seconds", 60) or 60))
+        except (TypeError, ValueError):
+            interval = 60
         now = time.time()
-        if restr != _last_restr or now - _last_restr_ts > 600:
-            policies.apply_restrictions(restr)
+        if restr != _last_restr or now - _last_restr_ts > interval:
+            failed = policies.apply_restrictions(restr)
             _last_restr = restr
             _last_restr_ts = now
+            if failed:
+                names = "、".join(policies.display_name(k) for k in failed)
+                logger.error(f"系统限制写入注册表失败（可能被安全软件拦截）: {names}")
     except Exception as e:
         logger.error(f"应用系统限制失败: {e}")
 
