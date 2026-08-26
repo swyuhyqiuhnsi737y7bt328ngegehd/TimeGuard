@@ -21,7 +21,9 @@ def main():
         assert kind in ("proc", "hotkey"), key
         assert label, key
         assert targets, key
-    print("PASS: 限制项映射完整")
+        assert restrictor.display_name(key) == label, key
+    assert restrictor.display_name("not_a_real_key") == "not_a_real_key"
+    print("PASS: 限制项映射完整（含 display_name）")
 
     # 2) 目标解析
     procs = restrictor.process_targets(["disable_cmd", "disable_taskmgr"])

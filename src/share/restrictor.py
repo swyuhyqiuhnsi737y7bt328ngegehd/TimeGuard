@@ -40,7 +40,9 @@ RESTRICTIONS = {
 
 
 def display_name(key):
-    return RESTRICTIONS.get(key, (None, None, None, key))[3]
+    """限制项显示名；未知 key 原样返回（兼容旧配置中的已废弃项）。"""
+    info = RESTRICTIONS.get(key)
+    return info[2] if info else key
 
 
 def process_targets(enabled) -> set:
