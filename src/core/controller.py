@@ -153,6 +153,10 @@ def _ensure_autostart():
 
     启动项只在注册表（非计划任务/启动文件夹）；每次启动都校正，
     避免卸载测试/路径变动后重启不再自动运行。
+
+    同时清除 StartupApproved\Run 里的 TimeGuard 禁用标记：任务管理器/
+    360 开机加速把启动项标记为“禁用”后，即使 Run 键重新写回也不会执行，
+    必须连标记一起清掉（只动 TimeGuard 自己的条目，不影响其它启动项）。
     """
     if not paths.is_frozen():
         return
@@ -168,6 +172,19 @@ def _ensure_autostart():
             winreg.SetValueEx(key, "TimeGuard", 0, winreg.REG_SZ, sys.executable)
             logger.info(f"已校正开机自启动: {sys.executable}")
         winreg.CloseKey(key)
+        # 清除禁用标记（StartupApproved\Run 下对应条目；不存在则忽略）
+        try:
+            k2 = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
+                                0, winreg.KEY_SET_VALUE)
+            try:
+                winreg.DeleteValue(k2, "TimeGuard")
+                logger.info("已清除开机自启动禁用标记（StartupApproved）")
+            except FileNotFoundError:
+                pass
+            winreg.CloseKey(k2)
+        except FileNotFoundError:
+            pass
     except Exception as e:
         logger.error(f"写入开机自启动失败: {e}")
 
