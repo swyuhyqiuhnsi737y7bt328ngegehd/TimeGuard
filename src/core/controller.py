@@ -190,6 +190,7 @@ def _ensure_autostart():
 
 
 def main():
+    global _restrictor  # 主循环内会重建执行器（对其赋值），须声明为模块级全局
     if not util.single_instance("core"):
         if util.launched_by_user():
             util.notify_ui("TimeGuard", "主控程序已在运行（请看任务栏托盘图标）。")
