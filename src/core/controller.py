@@ -41,7 +41,7 @@ def _open_admin():
 
 
 def _lock_now():
-    enforcer.set_lock("家长手动锁定", time.time() + 8 * 3600)
+    enforcer.set_lock("家长手动锁定", time.time() + 8 * 3600, source="manual")
     enforcer.ensure_lockscreen()
 
 
@@ -251,14 +251,19 @@ def main():
                     st["warned_no_pwd"] = True
                 time.sleep(interval)
                 continue
+            # 家长加时请求先于配额判断处理：lockscreen 解锁写了 extra_req.json，
+            # 若等本 tick 末尾才加时，下个 tick 会因配额未变而重新锁定（解锁跳回 bug）
+            _apply_extra_requests()
             now = datetime.now()
             used, extra, _ = clock.tick(cfg, now)
             quota = policy.quota_for(cfg, now)
             allowed = quota + extra
             in_forb, until = policy.forbidden_window_info(cfg, now)
-            # 手动锁定（家长在托盘/管理界面发起的锁定，直到时间到或密码解锁）
+            # 手动锁定（家长在托盘/管理界面发起，source=manual）：仅这种锁由 core 持续维持；
+            # 配额/时段自动锁（source=auto/旧版无 source）在条件消失后必须能自动解除
             manual = util.read_json(paths.lock_flag_path(), None)
-            manual_active = bool(manual) and float(manual.get("until", 0)) > time.time()
+            manual_active = (bool(manual) and manual.get("source") == "manual"
+                             and float(manual.get("until", 0)) > time.time())
             reason, until_ts = None, None
             if in_forb:
                 reason = f"禁止使用时段，{until.strftime('%H:%M')} 后可继续"
@@ -294,7 +299,6 @@ def main():
                         st["reminded"] = True
                 else:
                     st["reminded"] = False
-            _apply_extra_requests()
             # 周期性复核保护组件（防止守望进程被全部清掉）
             tick_no += 1
             if tick_no % 12 == 0:

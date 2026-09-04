@@ -469,7 +469,7 @@ def _main():
 
     def lock_now():
         from core import enforcer
-        enforcer.set_lock("家长手动锁定", time.time() + 8 * 3600)
+        enforcer.set_lock("家长手动锁定", time.time() + 8 * 3600, source="manual")
         enforcer.ensure_lockscreen()
         messagebox.showinfo("TimeGuard", "已锁定。", parent=root)
 

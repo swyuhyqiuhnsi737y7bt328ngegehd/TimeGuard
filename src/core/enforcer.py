@@ -7,9 +7,14 @@ from guard import watchdog
 from share import logger, paths, util
 
 
-def set_lock(reason: str, until_ts: float):
+def set_lock(reason: str, until_ts: float, source: str = "auto"):
+    """写锁定标志。source: auto=配额/禁止时段自动锁，manual=家长手动锁。
+
+    manual 锁由家长主动解除；auto 锁在配额/时段条件消失后必须能自动解除，
+    controller 据此区分，避免“解锁加时后重新施加的 auto 锁被误当手动锁维持”。
+    """
     util.write_json(paths.lock_flag_path(), {"reason": reason, "until": until_ts,
-                                             "ts": time.time()})
+                                             "ts": time.time(), "source": source})
 
 
 def clear_lock():
