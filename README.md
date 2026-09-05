@@ -69,6 +69,17 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 | 配置 | config/policy.json | 策略（家长密码为空时限制不生效） | 复制到 dist |
 | 运行状态 | state/ | usage.json、lock.flag、守护注册、日志 | 运行时生成 |
 
+## 二点五、预编译版（免 Python，推荐普通用户）
+
+从 [Releases](https://github.com/swyuhyqiuhnsi737y7bt328ngegehd/TimeGuard/releases) 下载
+`TimeGuard-v1.0.0-win64.zip`，解压到任意目录（路径避免中文）后：
+
+1. 双击 `core.exe` —— 主控启动，自动写入开机自启动并部署守护副本；
+2. 双击 `admin.exe` 设置家长密码（密码为空时限制不生效），并按需勾选系统功能限制；
+3. 到时间自动全屏锁定，输入家长密码解锁即加时；卸载用 admin.exe -> 卸载。
+
+> 360/Defender 可能误报进程自我保护行为，请把目录加入信任区（本程序非恶意软件，源码全公开）。
+
 ## 三、构建
 
 ### 3.1 环境要求
