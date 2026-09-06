@@ -115,6 +115,20 @@ def _show_lock(root, flag, state):
     except Exception as e:
         logger.error(f"锁屏加固失败: {e}")
 
+    # 高频置顶压制：约 60 次/秒，任何窗口（全屏游戏/弹窗等）试图盖过锁屏时
+    # 16ms 内被压回顶层；解锁（frame 置 None）后循环自停
+    def _pin_loop():
+        if state.get("frame") is None:
+            return
+        try:
+            if state.get("hwnd"):
+                winlock.pin_topmost(state["hwnd"])
+        except Exception:
+            pass
+        top.after(16, _pin_loop)
+
+    top.after(16, _pin_loop)
+
 
 def main():
     if not util.single_instance("lockscreen"):

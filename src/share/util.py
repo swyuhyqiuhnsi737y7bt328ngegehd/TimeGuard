@@ -199,12 +199,21 @@ def kill_pids(pids):
 
 
 def spawn(cmd, env=None, cwd=None):
-    """启动进程（隐藏控制台窗口）。失败返回 None。"""
+    """孤儿化启动进程（隐藏控制台窗口）。失败返回 None。
+
+    通过 cmd.exe start 孵化：start 启动目标后 cmd 立即退出，目标进程
+    成为孤儿（父进程已死）。这样 taskkill /T（结束进程树）杀掉调用方时
+    不会把守护进程连带清除——守望环中 core/guardian/fileguard 互相拉起
+    的前提是彼此不在对方的进程树里（漏洞修复：锁屏下 Ctrl+Alt+Del ->
+    任务管理器结束 core 进程树曾导致守护全灭）。
+    """
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        return subprocess.Popen(cmd, creationflags=flags, env=env, cwd=cwd, close_fds=True)
+        target = subprocess.list2cmdline(cmd)
+        return subprocess.Popen(["cmd.exe", "/c", "start", "", "/b", target],
+                                creationflags=flags, env=env, cwd=cwd, close_fds=True)
     except Exception as e:
-        logger.error(f"启动进程失败 {cmd}: {e}")
+        logger.error(f"孤儿化启动进程失败 {cmd}: {e}")
         return None
 
 

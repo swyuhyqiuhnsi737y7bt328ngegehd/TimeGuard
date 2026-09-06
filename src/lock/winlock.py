@@ -157,6 +157,14 @@ def force_topmost(hwnd):
     _user32.SetForegroundWindow(hwnd)
 
 
+def pin_topmost(hwnd):
+    """仅置顶不抢焦点（供高频调用，约 60 次/秒）：任何窗口试图盖过锁窗时
+    16ms 内被压回顶层。SetForegroundWindow 受系统前台锁限制且开销高，
+    抢焦点保持低频（见 force_topmost）。"""
+    _user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+
+
 # ---------------- 系统快捷键屏蔽 ----------------
 
 _hook = None
