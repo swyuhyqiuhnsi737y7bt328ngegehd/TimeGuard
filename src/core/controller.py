@@ -116,6 +116,16 @@ def _ensure_protection():
 
 _live_cfg = {}          # 主循环重载后更新，限制执行器线程读取（避免线程内反复读盘验签）
 _restrictor = None     # share.restrictor.Restrictor：进程拦截 + Win+R 钩子
+_live_lockdown = False  # 是否处于锁定状态（锁定时强制封杀任务管理器/命令行等破解入口）
+
+
+def _update_live_lockdown(locked: bool):
+    """锁定状态变化时调用：锁屏期间强制拦截 taskmgr/cmd/powershell 等入口。
+
+    单独用函数（带 global）赋值，避免 main 内直接赋值触发 UnboundLocalError。
+    """
+    global _live_lockdown
+    _live_lockdown = bool(locked)
 
 
 def _update_live_cfg(cfg):
@@ -131,6 +141,7 @@ def _update_live_cfg(cfg):
                 poll = 1.0
             _restrictor = restrictor.Restrictor(
                 lambda: _live_cfg.get("system_restrictions", []) or [],
+                get_lockdown=lambda: _live_lockdown,
                 poll_seconds=poll)
             _restrictor.start()
             logger.info(f"系统功能限制执行器已启动（轮询 {poll}s）：进程拦截 + Win+R 钩子")
@@ -249,6 +260,7 @@ def main():
                 if not st["warned_no_pwd"]:
                     logger.warn("未设置家长密码，限制功能未启用（请用 admin.exe 设置）")
                     st["warned_no_pwd"] = True
+                _update_live_lockdown(False)
                 time.sleep(interval)
                 continue
             # 家长加时请求先于配额判断处理：lockscreen 解锁写了 extra_req.json，
@@ -299,6 +311,9 @@ def main():
                         st["reminded"] = True
                 else:
                     st["reminded"] = False
+            # 锁定期间强制封杀破解入口（任务管理器/命令行/终端/regedit）：
+            # 堵死“Ctrl+Alt+Del -> 任务管理器 -> 运行新任务 -> taskkill”链路
+            _update_live_lockdown(bool(reason) or manual_active)
             # 周期性复核保护组件（防止守望进程被全部清掉）
             tick_no += 1
             if tick_no % 12 == 0:

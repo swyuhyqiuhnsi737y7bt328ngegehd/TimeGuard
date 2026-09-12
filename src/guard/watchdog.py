@@ -17,7 +17,7 @@ from share import logger, paths, util
 from share.lockfile import FileLocker
 
 GUARDIAN_COUNT = 3        # 守望进程副本数（含自己）
-WATCH_INTERVAL = 3        # 秒
+WATCH_INTERVAL = 1        # 秒：锁屏/核心被杀后 1 秒内补位，压缩破解空档期
 SPAWN_GATE_SECONDS = 4    # 同一时刻只允许一个守望者发起拉起，避免重复拉起
 
 
@@ -223,20 +223,24 @@ def main():
     locker = FileLocker()
     locker.lock_self()  # 占用自己的 exe 文件，阻止被删除/改名
     logger.info(f"guardian[{token}] 启动 pid={os.getpid()}")
+    tick = 0
     while True:
         if util.quit_flag_active():
             logger.info(f"guardian[{token}] 收到退出指令")
             break
+        tick += 1
         try:
             ensure_guardians()
             ensure_fileguard()
             ensure_service("core", "core.exe", "core.controller")
             ensure_service("lockscreen", "lockscreen.exe", "lock.lockscreen")
-            _cleanup_entries(token)
-            # 心跳：刷新自己的注册条目
-            util.write_json(paths.guardian_entry_path(token),
-                            {"pid": os.getpid(), "token": token, "ts": time.time(),
-                             "cmd": _guardian_cmd(token)})
+            # 孤儿条目清理与心跳降频（1 秒巡检下没必要每秒做文件 IO）
+            if tick % 30 == 1:
+                _cleanup_entries(token)
+            if tick % 5 == 1:
+                util.write_json(paths.guardian_entry_path(token),
+                                {"pid": os.getpid(), "token": token, "ts": time.time(),
+                                 "cmd": _guardian_cmd(token)})
         except Exception as e:
             logger.error(f"guardian[{token}] 循环异常: {e}")
         time.sleep(WATCH_INTERVAL)

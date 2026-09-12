@@ -65,9 +65,28 @@ def hotkey_targets(enabled) -> set:
     return out
 
 
-def kill_forbidden_once(enabled) -> int:
-    """结束所有被禁程序的当前实例；返回尝试结束的进程数。"""
+# 锁屏期间强制拦截的进程（不看家长勾选）：任务管理器 / 命令行 / 终端 / regedit
+# 是“Ctrl+Alt+Del -> 任务管理器 -> 运行新任务 -> taskkill 杀锁屏与守护”这条
+# 破解链路的入口，锁定期间必须封死；解锁后自动恢复（不再拦截）。
+LOCKDOWN_TARGETS = ("taskmgr.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
+                    "wt.exe", "WindowsTerminal.exe", "regedit.exe",
+                    "mmc.exe", "wscript.exe", "cscript.exe", "mshta.exe")
+
+
+def lockdown_targets() -> set:
+    """锁定期间强制拦截的进程名集合（小写）。"""
+    return {t.lower() for t in LOCKDOWN_TARGETS}
+
+
+def kill_forbidden_once(enabled, lockdown: bool = False) -> int:
+    """结束所有被禁程序的当前实例；返回尝试结束的进程数。
+
+    lockdown=True 时额外结束 LOCKDOWN_TARGETS（锁屏期间封死破解入口），
+    与家长勾选的限制项取并集。
+    """
     names = process_targets(enabled)
+    if lockdown:
+        names |= lockdown_targets()
     if not names:
         return 0
     killed = 0
@@ -89,9 +108,10 @@ class Restrictor(threading.Thread):
     随 core 退出而终止（daemon 线程），退出时自动卸载热键钩子。
     """
 
-    def __init__(self, get_restrictions, poll_seconds=1.0):
+    def __init__(self, get_restrictions, get_lockdown=None, poll_seconds=1.0):
         super().__init__(daemon=True, name="restrictor")
         self._get = get_restrictions
+        self._get_lockdown = get_lockdown
         self._poll = max(0.5, float(poll_seconds or 1.0))
         self._stop = threading.Event()
 
@@ -103,8 +123,9 @@ class Restrictor(threading.Thread):
         while not self._stop.wait(self._poll):
             try:
                 enabled = self._get() or []
+                lockdown = bool(self._get_lockdown()) if self._get_lockdown else False
                 try:
-                    kill_forbidden_once(enabled)
+                    kill_forbidden_once(enabled, lockdown)
                 except Exception as e:
                     logger.error(f"结束被禁进程异常: {e}")
                 hot = hotkey_targets(enabled)
