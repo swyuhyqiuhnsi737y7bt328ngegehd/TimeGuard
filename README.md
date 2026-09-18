@@ -72,7 +72,7 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 ## 二点五、预编译版（免 Python，推荐普通用户）
 
 从 [Releases](https://github.com/swyuhyqiuhnsi737y7bt328ngegehd/TimeGuard/releases/latest) 下载
-`TimeGuard-v1.0.1-win64.zip`，解压到任意目录（路径避免中文）后：
+`TimeGuard-v1.0.2-win64.zip`，解压到任意目录（路径避免中文）后：
 
 1. 双击 `core.exe` —— 主控启动，自动写入开机自启动并部署守护副本；
 2. 双击 `admin.exe` 设置家长密码（密码为空时限制不生效），并按需勾选系统功能限制；
