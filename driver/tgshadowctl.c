@@ -93,13 +93,29 @@ static int CmdVolumes(HANDLE h)
 static int CmdEnable(HANDLE h, ULONG volume, ULONG mb)
 {
     TGSHADOW_ENABLE_INPUT in;
+    DWORD err;
 
     in.VolumeNumber = volume;
     in.Flags = 0;
     in.ShadowBytes = (ULONG64)mb * 1024ULL * 1024ULL;
 
-    if (DoIoctl(h, IOCTL_TGSHADOW_ENABLE, &in, sizeof(in), NULL, 0, NULL) != 0)
+    if (DoIoctl(h, IOCTL_TGSHADOW_ENABLE, &in, sizeof(in), NULL, 0, NULL) != 0) {
+        err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND) {
+            fprintf(stderr,
+                    "提示: 卷号 %lu 不存在（驱动无法打开 \\Device\\HarddiskVolume%lu）。\n"
+                    "      先运行 'tgshadowctl volumes' 查看可用卷号；\n"
+                    "      再确认系统盘卷号：PowerShell 执行\n"
+                    "        [Text.Encoding]::Unicode.GetString((Get-ItemProperty\n"
+                    "          'HKLM:\\SYSTEM\\MountedDevices').'\\DosDevices\\C:')\n",
+                    volume, volume);
+        } else if (err == ERROR_ACCESS_DENIED) {
+            fprintf(stderr, "提示: 访问被拒绝 —— 请以【管理员】身份运行。\n");
+        } else if (err == ERROR_ALREADY_ASSIGNED || err == 183) {
+            fprintf(stderr, "提示: 该卷已处于保护中，先执行 disable。\n");
+        }
         return 1;
+    }
     printf("已启用保护: 卷 %lu, 影子容量 %lu MB\n", volume, mb);
     return 0;
 }
