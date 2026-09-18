@@ -47,7 +47,7 @@ static int DoIoctl(HANDLE h, DWORD code, void *in, DWORD inLen,
 static int CmdVersion(HANDLE h)
 {
     TGSHADOW_STATUS st;
-    if (DoIoctl(h, IOCTL_TGSHADOW_GET_VERSION, NULL, 0, &st, sizeof(st), NULL) != 0)
+    if (DoIoctl(h, IOCTL_TGSHADOW_GET_VERSION, NULL, 0u, &st, (DWORD)sizeof(st), NULL) != 0)
         return 1;
     printf("驱动版本: %u.%u\n", st.VersionMajor, st.VersionMinor);
     return 0;
@@ -56,7 +56,7 @@ static int CmdVersion(HANDLE h)
 static int CmdStatus(HANDLE h)
 {
     TGSHADOW_STATUS st;
-    if (DoIoctl(h, IOCTL_TGSHADOW_GET_STATUS, NULL, 0, &st, sizeof(st), NULL) != 0)
+    if (DoIoctl(h, IOCTL_TGSHADOW_GET_STATUS, NULL, 0u, &st, (DWORD)sizeof(st), NULL) != 0)
         return 1;
     printf("版本          : %u.%u\n", st.VersionMajor, st.VersionMinor);
     printf("影子保护      : %s\n", st.Protected ? "已启用" : "未启用");
@@ -77,8 +77,8 @@ static int CmdVolumes(HANDLE h)
     DWORD bytes = 0;
     ULONG count, i;
 
-    if (DoIoctl(h, IOCTL_TGSHADOW_GET_VOLUMES, NULL, 0,
-                vols, sizeof(vols), &bytes) != 0)
+    if (DoIoctl(h, IOCTL_TGSHADOW_GET_VOLUMES, NULL, 0u,
+                vols, (DWORD)sizeof(vols), &bytes) != 0)
         return 1;
 
     count = bytes / sizeof(TGSHADOW_VOLUME_INFO);
@@ -99,7 +99,7 @@ static int CmdEnable(HANDLE h, ULONG volume, ULONG mb)
     in.Flags = 0;
     in.ShadowBytes = (ULONG64)mb * 1024ULL * 1024ULL;
 
-    if (DoIoctl(h, IOCTL_TGSHADOW_ENABLE, &in, sizeof(in), NULL, 0, NULL) != 0) {
+    if (DoIoctl(h, IOCTL_TGSHADOW_ENABLE, &in, (DWORD)sizeof(in), NULL, 0u, NULL) != 0) {
         err = GetLastError();
         if (err == ERROR_FILE_NOT_FOUND) {
             fprintf(stderr,
@@ -122,7 +122,7 @@ static int CmdEnable(HANDLE h, ULONG volume, ULONG mb)
 
 static int CmdDisable(HANDLE h)
 {
-    if (DoIoctl(h, IOCTL_TGSHADOW_DISABLE, NULL, 0, NULL, 0, NULL) != 0)
+    if (DoIoctl(h, IOCTL_TGSHADOW_DISABLE, NULL, 0u, NULL, 0u, NULL) != 0)
         return 1;
     printf("已停用保护并卸载卷过滤\n");
     return 0;
