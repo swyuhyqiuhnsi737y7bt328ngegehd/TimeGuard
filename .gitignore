@@ -8,3 +8,11 @@ __pycache__/
 _diag_*.png
 admin_shot.png
 pw_*.png
+
+# 内核驱动构建产物与测试签名证书
+*.sys
+*.obj
+*.pdb
+*.ilk
+*.cer
+*.pfx
