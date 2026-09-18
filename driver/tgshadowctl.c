@@ -133,6 +133,11 @@ int wmain(int argc, wchar_t **argv)
     HANDLE h;
     int rc = 0;
 
+    /* UTF-8 console output: this source file is UTF-8, but the Windows console
+       defaults to codepage 936 (GBK), which garbles Chinese output. Switch the
+       console output codepage to UTF-8 for this process. */
+    SetConsoleOutputCP(CP_UTF8);
+
     if (argc < 2) {
         wprintf(L"用法: tgshadowctl <version|status|volumes|enable <卷号> [MB]|disable>\n");
         return 2;
