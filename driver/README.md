@@ -41,14 +41,33 @@
 
 ## VM 内测试（依次执行）
 
+> **推荐**：把 `build\Debug\tgshadow.sys`、`tgshadowctl.exe`、`driver\vm_test.bat` 放进 VM 的
+> 同一目录（如 `C:\tg\`），以**管理员**运行 `vm_test.bat` —— 它按正确顺序完成
+> 停服务 → 签名 → 导入证书 → 加载 → 查询，避免下面两个常见坑。
+
+### ⚠️ 两个必踩的坑（已处理）
+
+1. **顺序必须"先签名、后加载"**：驱动一旦 `sc start` 进内核，`.sys` 文件就被占用，
+   再签名会报 *"文件正由另一进程使用"*。改代码重签必须先
+   `sc.exe stop tgshadow` + `sc.exe delete tgshadow`（或重启 VM）。
+2. **PowerShell 中必须写 `sc.exe`**：PowerShell 里 `sc` 是 `Set-Content` 的别名，
+   直接敲 `sc create ...` 会报 *"找不到接受实际参数 type= 的位置形式参数"*。
+   在 CMD 中 `sc` 正常；在 PowerShell 中一律用 `sc.exe`。
+
+### 手动步骤
+
 1. **开启测试签名**（管理员 CMD，之后重启 VM）：
        bcdedit /set testsigning on
-2. 把 `build\Debug\tgshadow.sys` 复制进 VM（例如 C:\tg\tgshadow.sys，连同 `sign_test.bat` 同目录结构）
-3. **签名**（管理员）：`driver\sign_test.bat`
-4. **加载**（管理员）：`driver\load_test.bat`
-   - 成功标志：`sc query tgshadow` 显示 `RUNNING`
-5. 查看内核日志：**DbgView**（管理员，勾选 Capture Kernel）或 WinDbg，过滤 `[TgShadow]`
-6. **卸载**：`driver\unload_test.bat`
+2. 复制 `tgshadow.sys` / `tgshadowctl.exe` / `vm_test.bat` 到 VM 同一目录（如 `C:\tg\`）
+3. **签名 + 加载**（管理员运行 `vm_test.bat`，或手动）：
+       sc.exe stop tgshadow
+       sc.exe delete tgshadow
+       powershell -Command "$s='CN=TimeGuard Test Signing'; $c=Get-ChildItem Cert:\CurrentUser\My ^| ?{$_.Subject -eq $s} ^| select -First 1; Set-AuthenticodeSignature -FilePath C:\tg\tgshadow.sys -Certificate $c"
+       sc.exe create tgshadow type= kernel start= demand error= normal binPath= C:\tg\tgshadow.sys
+       sc.exe start tgshadow
+   - 成功标志：`sc.exe query tgshadow` 显示 `RUNNING`
+4. 查看内核日志：**DbgView**（管理员，勾选 Capture Kernel）或 WinDbg，过滤 `[TgShadow]`
+5. **卸载**：`sc.exe stop tgshadow` + `sc.exe delete tgshadow`（或 `unload_test.bat`）
 
 ### P1 验收清单
 
