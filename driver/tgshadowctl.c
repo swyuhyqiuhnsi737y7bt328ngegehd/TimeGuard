@@ -12,9 +12,61 @@
   需要在虚拟机内以【管理员】运行（打开 \.TgShadow 设备）。
 ==============================================================================*/
 #include <windows.h>
+#include <winsvc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "../tgshadow/tgshadow.h"
+
+#pragma comment(lib, "advapi32.lib")
+
+/**
+ * 设备打不开时的诊断：查询 tgshadow 服务状态并给出可执行的下一步。
+ * 常见原因：demand 启动的驱动在系统重启后不会自动加载。
+ */
+static void DiagnoseDriverService(void)
+{
+    SC_HANDLE scm, svc;
+    SERVICE_STATUS st;
+    const char *stateText = "未知";
+
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm == NULL) {
+        fprintf(stderr, "       诊断: 无法查询服务管理器 (GetLastError=%lu)\n",
+                GetLastError());
+        return;
+    }
+    svc = OpenServiceW(scm, L"tgshadow", SERVICE_QUERY_STATUS);
+    if (svc == NULL) {
+        fprintf(stderr,
+                "       诊断: 服务 tgshadow 【未安装】\n"
+                "       处理: 运行 vm_test.bat（自动签名+加载），或手动执行\n"
+                "             sc.exe create tgshadow type= kernel start= demand error= normal binPath= C:\\tg\\tgshadow.sys\n"
+                "             sc.exe start tgshadow\n");
+        CloseServiceHandle(scm);
+        return;
+    }
+    if (QueryServiceStatus(svc, &st)) {
+        switch (st.dwCurrentState) {
+        case SERVICE_STOPPED:       stateText = "【已停止】"; break;
+        case SERVICE_RUNNING:       stateText = "运行中（但设备未创建，可能 DriverEntry 失败）"; break;
+        case SERVICE_START_PENDING: stateText = "启动中"; break;
+        case SERVICE_STOP_PENDING:  stateText = "停止中"; break;
+        case SERVICE_PAUSED:        stateText = "已暂停"; break;
+        default: break;
+        }
+        fprintf(stderr, "       诊断: 服务状态 = %s\n", stateText);
+        if (st.dwCurrentState == SERVICE_STOPPED) {
+            fprintf(stderr,
+                    "       说明: 本驱动是 demand(按需) 启动，系统重启后不会自动加载\n"
+                    "       处理: 执行  sc.exe start tgshadow\n");
+        } else if (st.dwCurrentState == SERVICE_RUNNING) {
+            fprintf(stderr,
+                    "       提示: 服务在跑但符号链接不存在，检查内核日志 [TgShadow] 前缀\n");
+        }
+    }
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+}
 
 static HANDLE OpenDevice(void)
 {
@@ -23,9 +75,14 @@ static HANDLE OpenDevice(void)
                            FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "[错误] 无法打开 %ws (GetLastError=%lu)\n"
-                        "       驱动是否已加载？(load_test.bat) 是否以管理员运行？\n",
-                TGSHADOW_WIN32_DEVICE, GetLastError());
+        DWORD err = GetLastError();
+        fprintf(stderr, "[错误] 无法打开 %ws (GetLastError=%lu)\n",
+                TGSHADOW_WIN32_DEVICE, err);
+        if (err == ERROR_ACCESS_DENIED) {
+            fprintf(stderr, "       诊断: 访问被拒绝 —— 请以【管理员】身份运行\n");
+        } else {
+            DiagnoseDriverService();
+        }
     }
     return h;
 }
