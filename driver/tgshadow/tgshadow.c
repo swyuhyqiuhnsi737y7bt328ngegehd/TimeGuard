@@ -46,6 +46,44 @@ typedef struct _TGSHADOW_GLOBAL {
 
 static TGSHADOW_GLOBAL g_TgShadow;
 
+/* ------------------------------------------------------------------ 崩溃定位辅助 */
+
+/**
+ * 把当前执行到的关键步骤写进注册表：
+ *   HKLM\SOFTWARE\TimeGuard\TgShadowLastStep
+ *
+ * 用途：蓝屏重启后无需 DbgView / 双机调试，一条命令即可看到最后一步：
+ *   reg query "HKLM\SOFTWARE\TimeGuard" /v TgShadowLastStep
+ *
+ * 只能在 PASSIVE_LEVEL 调用（enable/disable 的 IOCTL 路径满足）。
+ * 绝不可在读写 I/O 路径调用 —— ZwSetValueKey 在 DISPATCH_LEVEL 会崩溃。
+ */
+static VOID
+TgShadowTrace(_In_ PCWSTR Step)
+{
+    HANDLE            key = NULL;
+    UNICODE_STRING    keyName, valueName;
+    OBJECT_ATTRIBUTES oa;
+    NTSTATUS          status;
+
+    RtlInitUnicodeString(&keyName, L"\\Registry\\Machine\\SOFTWARE\\TimeGuard");
+    InitializeObjectAttributes(&oa, &keyName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    status = ZwCreateKey(&key, KEY_SET_VALUE, &oa, 0, NULL,
+                         REG_OPTION_NON_VOLATILE, NULL);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+    RtlInitUnicodeString(&valueName, L"TgShadowLastStep");
+#pragma warning(push)
+#pragma warning(disable: 4996)
+    ZwSetValueKey(key, &valueName, 0, REG_SZ, (PVOID)Step,
+                  (ULONG)((wcslen(Step) + 1) * sizeof(WCHAR)));
+#pragma warning(pop)
+    ZwClose(key);
+}
+
 /* ------------------------------------------------------------------ 影子映射（P2） */
 
 /* 注：卷容量改由用户态查询后经 IOCTL_ENABLE 传入（见 tgshadow.h 说明）。
@@ -440,10 +478,13 @@ TgShadowEnable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
         }
     }
 
+    TgShadowTrace(L"enable: attaching volume");
     status = TgShadowAttachToVolume(in->VolumeNumber);
     if (!NT_SUCCESS(status) && status != STATUS_ALREADY_REGISTERED) {
+        TgShadowTrace(L"enable: attach FAILED");
         return status;
     }
+    TgShadowTrace(L"enable: attach ok, allocating map");
 
     /* P2：按用户态提供的卷容量建立影子位图（内核不自行查询，见 tgshadow.h 说明） */
     {
@@ -456,9 +497,11 @@ TgShadowEnable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
         }
         status = TgShadowAllocMap(volumeBytes);
         if (!NT_SUCCESS(status)) {
+            TgShadowTrace(L"enable: map alloc FAILED");
             return status;
         }
     }
+    TgShadowTrace(L"enable: map ok, turning protection on");
 
     {
         KIRQL oldIrql;
@@ -467,6 +510,7 @@ TgShadowEnable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
         g_TgShadow.ShadowBytesTotal = in->ShadowBytes;
         KeReleaseSpinLock(&g_TgShadow.Lock, oldIrql);
     }
+    TgShadowTrace(L"enable: DONE (protection on)");
 
     DbgPrint("[TgShadow] protection ENABLED on volume %lu (shadow=%llu bytes)\n",
              in->VolumeNumber, in->ShadowBytes);
