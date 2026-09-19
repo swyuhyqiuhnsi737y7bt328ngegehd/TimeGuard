@@ -13,6 +13,7 @@
   调试：VM 内 testsigning 开启 + 自签名；双机内核调试见 driver/README.md
 ==============================================================================*/
 #include <ntddk.h>
+#include <ntdddisk.h>   /* IOCTL_DISK_GET_LENGTH_INFO / GET_LENGTH_INFORMATION */
 #include "tgshadow.h"
 
 #define TGSHADOW_TAG  'hSgT'   /* 'TgSh' 反写，池标记 */
@@ -35,9 +36,160 @@ typedef struct _TGSHADOW_GLOBAL {
     ULONG64         WriteCount;
     ULONG64         RedirectedBlocks;
     KSPIN_LOCK      Lock;
+
+    /* ---- P2：影子映射元数据（位图记录哪些块被写过） ---- */
+    RTL_BITMAP      ShadowBitmap;       /* 已标记块位图 */
+    PVOID           ShadowBitmapBuffer; /* 位图缓冲（非分页池） */
+    ULONG64         VolumeBytes;        /* 受保护卷容量 */
+    ULONG64         BlockCount;         /* 总块数 = VolumeBytes / BLOCK_SIZE */
 } TGSHADOW_GLOBAL, *PTGSHADOW_GLOBAL;
 
 static TGSHADOW_GLOBAL g_TgShadow;
+
+/* ------------------------------------------------------------------ 影子映射（P2） */
+
+/**
+ * 查询卷容量。以同步 IRP 下发 IOCTL_DISK_GET_LENGTH_INFO 给下层设备。
+ * 必须在 PASSIVE_LEVEL 调用（Enable 的 IOCTL 路径满足）。
+ */
+static NTSTATUS
+TgShadowQueryVolumeSize(_In_ PDEVICE_OBJECT LowerDevice, _Out_ PULONG64 Bytes)
+{
+    KEVENT                event;
+    IO_STATUS_BLOCK       iosb;
+    PIRP                  irp;
+    GET_LENGTH_INFORMATION info;
+    NTSTATUS              status;
+
+    RtlZeroMemory(&info, sizeof(info));
+    KeInitializeEvent(&event, NotificationEvent, FALSE);
+
+    irp = IoBuildDeviceIoControlRequest(IOCTL_DISK_GET_LENGTH_INFO,
+                                        LowerDevice,
+                                        NULL, 0,
+                                        &info, sizeof(info),
+                                        FALSE, &event, &iosb);
+    if (irp == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    status = IoCallDriver(LowerDevice, irp);
+    if (status == STATUS_PENDING) {
+        KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+        status = iosb.Status;
+    }
+    if (NT_SUCCESS(status)) {
+        *Bytes = (ULONG64)info.Length.QuadPart;
+    }
+    return status;
+}
+
+/**
+ * 为受保护卷分配影子位图。位图 1 位 = 1 个 64KB 块。
+ * 例：100GB 卷 → 1.6M 块 → 200KB 非分页池，可接受。
+ */
+static NTSTATUS
+TgShadowAllocMap(_In_ ULONG64 VolumeBytes)
+{
+    ULONG64 blocks;
+    SIZE_T  bitmapBytes;
+    PVOID   buf;
+
+    blocks = VolumeBytes / TGSHADOW_BLOCK_SIZE;
+    if (blocks == 0) {
+        DbgPrint("[TgShadow] volume too small: %llu bytes\n", VolumeBytes);
+        return STATUS_INVALID_PARAMETER;
+    }
+    /* RtlSetBit/RtlTestBit 的索引是 ULONG；上限 4G 块 = 256TB，足够 */
+    if (blocks > 0xFFFFFFFFULL) {
+        blocks = 0xFFFFFFFFULL;
+    }
+    bitmapBytes = (SIZE_T)((blocks + 7) / 8);
+
+    /* 用 ExAllocatePoolWithTag 而非 ExAllocatePool2：后者的声明要求
+       NTDDI_VERSION >= WIN10_VB，否则编译器按未声明函数处理（返回 int），
+       在 x64 上会截断指针 —— 那是必蓝屏的隐患。 */
+#pragma warning(push)
+#pragma warning(disable: 4996)  /* 新 WDK 将本 API 标记为建议迁移 */
+    buf = ExAllocatePoolWithTag(NonPagedPoolNx, bitmapBytes, TGSHADOW_TAG);
+#pragma warning(pop)
+    if (buf == NULL) {
+        DbgPrint("[TgShadow] bitmap alloc failed (%llu bytes)\n",
+                 (ULONG64)bitmapBytes);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(buf, bitmapBytes);
+
+    g_TgShadow.ShadowBitmapBuffer = buf;
+    RtlInitializeBitMap(&g_TgShadow.ShadowBitmap, (PULONG)buf, (ULONG)blocks);
+    g_TgShadow.VolumeBytes = VolumeBytes;
+    g_TgShadow.BlockCount = blocks;
+    g_TgShadow.ShadowBytesUsed = 0;
+    g_TgShadow.RedirectedBlocks = 0;
+
+    DbgPrint("[TgShadow] shadow map ready: volume=%llu MB, blocks=%llu, bitmap=%llu KB\n",
+             VolumeBytes / (1024 * 1024), blocks, (ULONG64)bitmapBytes / 1024);
+    return STATUS_SUCCESS;
+}
+
+static VOID
+TgShadowFreeMap(VOID)
+{
+    if (g_TgShadow.ShadowBitmapBuffer != NULL) {
+        ExFreePoolWithTag(g_TgShadow.ShadowBitmapBuffer, TGSHADOW_TAG);
+        g_TgShadow.ShadowBitmapBuffer = NULL;
+    }
+    RtlZeroMemory(&g_TgShadow.ShadowBitmap, sizeof(g_TgShadow.ShadowBitmap));
+    g_TgShadow.VolumeBytes = 0;
+    g_TgShadow.BlockCount = 0;
+    g_TgShadow.ShadowBytesUsed = 0;
+    g_TgShadow.RedirectedBlocks = 0;
+    DbgPrint("[TgShadow] shadow map released\n");
+}
+
+/**
+ * 标记一段写范围覆盖到的块（P2：只记录，不做数据重定向）。
+ * 可在 PASSIVE_LEVEL 或 DISPATCH_LEVEL 调用（KeAcquireSpinLock 自行提升 IRQL）。
+ */
+static VOID
+TgShadowMarkWriteRange(_In_ ULONG64 Offset, _In_ ULONG Length)
+{
+    ULONG64 startBlock, endBlock, i, marked = 0;
+    KIRQL   irql;
+
+    if (g_TgShadow.ShadowBitmapBuffer == NULL || g_TgShadow.BlockCount == 0) {
+        return;
+    }
+    if (Length == 0) {
+        return;
+    }
+    /* 非顺序写（如 ByteOffset = -1）不映射到具体块，跳过 */
+    if (Offset == (ULONG64)-1) {
+        return;
+    }
+
+    startBlock = Offset / TGSHADOW_BLOCK_SIZE;
+    if (startBlock >= g_TgShadow.BlockCount) {
+        return;
+    }
+    endBlock = (Offset + (ULONG64)Length - 1) / TGSHADOW_BLOCK_SIZE;
+    if (endBlock >= g_TgShadow.BlockCount) {
+        endBlock = g_TgShadow.BlockCount - 1;
+    }
+
+    KeAcquireSpinLock(&g_TgShadow.Lock, &irql);
+    for (i = startBlock; i <= endBlock; i++) {
+        if (!RtlTestBit(&g_TgShadow.ShadowBitmap, (ULONG)i)) {
+            RtlSetBit(&g_TgShadow.ShadowBitmap, (ULONG)i);
+            marked++;
+        }
+    }
+    if (marked > 0) {
+        g_TgShadow.RedirectedBlocks += marked;
+        g_TgShadow.ShadowBytesUsed += marked * TGSHADOW_BLOCK_SIZE;
+    }
+    KeReleaseSpinLock(&g_TgShadow.Lock, irql);
+}
 
 /* ------------------------------------------------------------------ 工具函数 */
 
@@ -277,12 +429,27 @@ TgShadowEnable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
         return status;
     }
 
+    /* P2：查询受保护卷容量并建立影子位图 */
+    {
+        ULONG64 volumeBytes = 0;
+
+        TgShadowFreeMap();   /* 重复 enable 时先释放旧图 */
+        status = TgShadowQueryVolumeSize(g_TgShadow.LowerDevice, &volumeBytes);
+        if (!NT_SUCCESS(status)) {
+            DbgPrint("[TgShadow] query volume size failed 0x%08X\n", status);
+            return status;
+        }
+        status = TgShadowAllocMap(volumeBytes);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+    }
+
     {
         KIRQL oldIrql;
         KeAcquireSpinLock(&g_TgShadow.Lock, &oldIrql);
         g_TgShadow.Protected = 1;
         g_TgShadow.ShadowBytesTotal = in->ShadowBytes;
-        g_TgShadow.ShadowBytesUsed = 0;
         KeReleaseSpinLock(&g_TgShadow.Lock, oldIrql);
     }
 
@@ -303,6 +470,7 @@ TgShadowDisable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
         g_TgShadow.Protected = 0;
         KeReleaseSpinLock(&g_TgShadow.Lock, oldIrql);
     }
+    TgShadowFreeMap();
     DbgPrint("[TgShadow] protection DISABLED\n");
     Irp->IoStatus.Information = 0;
     return STATUS_SUCCESS;
@@ -354,18 +522,27 @@ TgShadowFilterReadWrite(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
 {
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
 
-    /* 防御：未成功挂载到卷时，绝不能把 IRP 转发给空的下层设备 */
-    if (g_TgShadow.LowerDevice == NULL) {
-        DbgPrint("[TgShadow] read/write with no lower device attached\n");
+    /* 只处理挂在卷上的过滤设备；控制设备收到读写属非法请求，
+       未挂载时也绝不能把 IRP 转发给空的下层设备（否则 BSOD） */
+    if (DeviceObject != g_TgShadow.FilterDevice || g_TgShadow.LowerDevice == NULL) {
+        DbgPrint("[TgShadow] read/write on non-filter device, rejected\n");
         Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
         Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    /* P1：只统计，不改动数据 —— 用 IoSkipCurrentIrpStackLocation 保证零破坏 */
+    /* P2：写请求记录到影子位图（数据仍直通，不改动 —— 零破坏）；
+       P3 起才把写入真正重定向到影子存储 */
     if (stack->MajorFunction == IRP_MJ_WRITE) {
         InterlockedIncrement64((volatile LONG64 *)&g_TgShadow.WriteCount);
+        if (g_TgShadow.Protected) {
+            LARGE_INTEGER off = stack->Parameters.Write.ByteOffset;
+            ULONG         len = stack->Parameters.Write.Length;
+            if (off.QuadPart >= 0 && len > 0) {
+                TgShadowMarkWriteRange((ULONG64)off.QuadPart, len);
+            }
+        }
     } else {
         InterlockedIncrement64((volatile LONG64 *)&g_TgShadow.ReadCount);
     }
@@ -387,6 +564,7 @@ TgShadowUnload(_In_ PDRIVER_OBJECT DriverObject)
              g_TgShadow.ReadCount, g_TgShadow.WriteCount);
 
     TgShadowDetachFromVolume();
+    TgShadowFreeMap();
 
     RtlInitUnicodeString(&linkName, L"\\??\\TgShadow");
     IoDeleteSymbolicLink(&linkName);

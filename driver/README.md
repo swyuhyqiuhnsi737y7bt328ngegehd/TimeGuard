@@ -10,9 +10,9 @@
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | 环境（WDK / 测试 VM / 测试签名 / 双机调试） | 🔄 进行中 |
-| **P1** | **控制设备 + IOCTL + 卷过滤挂载（直通 + 计数，不改数据）** | **✅ 代码完成，待 VM 验证** |
-| P2 | 拦截写 I/O，记录影子位图（仍不重定向） | ⏳ |
+| P0 | 环境（WDK / 测试 VM / 测试签名 / 双机调试） | ✅ 完成（WDK 10.0.26100 + Win10 VM） |
+| **P1** | **控制设备 + IOCTL + 卷过滤挂载（直通 + 计数，不改数据）** | **✅ VM 验证通过** |
+| **P2** | **拦截写 I/O，用位图记录被改块（仍不重定向数据）** | **✅ 代码完成，待 VM 验证** |
 | P3 | COW 重定向：读改写全走影子 + 提交/丢弃 | ⏳ |
 | P4 | 用户态服务：关机确认弹窗（保留需密码）+ 开机兜底 | ⏳ |
 | P5 | 可靠性：崩溃一致性、休眠/快速启动、与 360/BitLocker 共存 | ⏳ |
@@ -71,6 +71,23 @@
    - 成功标志：`sc.exe query tgshadow` 显示 `RUNNING`
 4. 查看内核日志：**DbgView**（管理员，勾选 Capture Kernel）或 WinDbg，过滤 `[TgShadow]`
 5. **卸载**：`sc.exe stop tgshadow` + `sc.exe delete tgshadow`（或 `unload_test.bat`）
+
+### P2 验收清单（写入记录）
+
+驱动加载 + enable 后：
+
+- [ ] status 里 **已重定向块数** 从 0 开始（位图已按卷容量建立）
+- [ ] 往受保护卷写数据后，**已重定向块数**与**影子已用字节**同步增长
+      （预期：写入量 ÷ 64KB ≈ 增长块数）
+- [ ] 反复读写大文件，系统稳定、无蓝屏
+- [ ] disable 后位图释放，status 各项归零
+
+验证示例（VM 内管理员，CMD）：
+
+    tgshadowctl.exe enable 3 32768
+    tgshadowctl.exe status                      :: 记下"已重定向块数"
+    powershell -Command "$b = New-Object byte[] (10485760); [IO.File]::WriteAllBytes('C:\tgtest.bin', $b)"
+    tgshadowctl.exe status                      :: 块数应约等于 10MB/64KB = 160 块
 
 ### P1 验收清单
 
