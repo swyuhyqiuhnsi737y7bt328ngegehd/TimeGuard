@@ -13,6 +13,7 @@
 ==============================================================================*/
 #include <windows.h>
 #include <winsvc.h>
+#include <winioctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "../tgshadow/tgshadow.h"
@@ -149,6 +150,37 @@ static int CmdVolumes(HANDLE h)
     return 0;
 }
 
+/**
+ * 查询卷容量（字节）。在用户态完成，再通过 IOCTL_ENABLE 传给驱动。
+ * 原因：内核里用 IoBuildDeviceIoControlRequest 向卷设备发同步 IRP 时，
+ * IRP 缺少 FileObject，卷/磁盘驱动解引用它会导致 0x3B + 0xC0000005 蓝屏。
+ */
+static int QueryVolumeSize(ULONG volNum, ULONG64 *bytes)
+{
+    WCHAR path[64];
+    HANDLE hv;
+    GET_LENGTH_INFORMATION info;
+    DWORD ret = 0;
+
+    swprintf_s(path, 64, L"\\\\.\\\\HarddiskVolume%lu", volNum);
+    hv = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                     NULL, OPEN_EXISTING, 0, NULL);
+    if (hv == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "[警告] 无法打开 %ws 查询容量 (GetLastError=%lu)\n",
+                path, GetLastError());
+        return -1;
+    }
+    if (!DeviceIoControl(hv, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0,
+                         &info, sizeof(info), &ret, NULL)) {
+        fprintf(stderr, "[警告] 查询卷容量失败 (GetLastError=%lu)\n", GetLastError());
+        CloseHandle(hv);
+        return -1;
+    }
+    CloseHandle(hv);
+    *bytes = (ULONG64)info.Length.QuadPart;
+    return 0;
+}
+
 static int CmdEnable(HANDLE h, ULONG volume, ULONG mb)
 {
     TGSHADOW_ENABLE_INPUT in;
@@ -157,6 +189,14 @@ static int CmdEnable(HANDLE h, ULONG volume, ULONG mb)
     in.VolumeNumber = volume;
     in.Flags = 0;
     in.ShadowBytes = (ULONG64)mb * 1024ULL * 1024ULL;
+    in.VolumeBytes = 0;
+    if (QueryVolumeSize(volume, &in.VolumeBytes) == 0) {
+        printf("卷 %lu 容量: %llu MB\n", volume,
+               (unsigned long long)(in.VolumeBytes / (1024ULL * 1024ULL)));
+    } else {
+        fprintf(stderr, "       查询失败，将由驱动按 32GB 兜底容量建图\n");
+        in.VolumeBytes = 0;
+    }
 
     if (DoIoctl(h, (DWORD)IOCTL_TGSHADOW_ENABLE, &in, (DWORD)sizeof(in), NULL, 0u, NULL) != 0) {
         err = GetLastError();

@@ -62,6 +62,10 @@ typedef struct _TGSHADOW_ENABLE_INPUT {
     TG_U32  VolumeNumber;       /* 要保护的卷号 */
     TG_U32  Flags;              /* 保留 */
     TG_U64  ShadowBytes;        /* 影子存储容量（0 = 使用驱动默认） */
+    /* 受保护卷的容量（字节），由用户态查询后传入（IOCTL_DISK_GET_LENGTH_INFO）。
+       必须由用户态提供：内核里用 IoBuildDeviceIoControlRequest 向卷设备发同步 IRP
+       时 IRP 没有 FileObject，卷/磁盘驱动解引用它会空指针崩溃(0x3B/0xC0000005)。 */
+    TG_U64  VolumeBytes;
 } TGSHADOW_ENABLE_INPUT, *PTGSHADOW_ENABLE_INPUT;
 
 /* IOCTL 定义（设备类型 0x8331 = 自定义） */

@@ -48,41 +48,9 @@ static TGSHADOW_GLOBAL g_TgShadow;
 
 /* ------------------------------------------------------------------ 影子映射（P2） */
 
-/**
- * 查询卷容量。以同步 IRP 下发 IOCTL_DISK_GET_LENGTH_INFO 给下层设备。
- * 必须在 PASSIVE_LEVEL 调用（Enable 的 IOCTL 路径满足）。
- */
-static NTSTATUS
-TgShadowQueryVolumeSize(_In_ PDEVICE_OBJECT LowerDevice, _Out_ PULONG64 Bytes)
-{
-    KEVENT                event;
-    IO_STATUS_BLOCK       iosb;
-    PIRP                  irp;
-    GET_LENGTH_INFORMATION info;
-    NTSTATUS              status;
-
-    RtlZeroMemory(&info, sizeof(info));
-    KeInitializeEvent(&event, NotificationEvent, FALSE);
-
-    irp = IoBuildDeviceIoControlRequest(IOCTL_DISK_GET_LENGTH_INFO,
-                                        LowerDevice,
-                                        NULL, 0,
-                                        &info, sizeof(info),
-                                        FALSE, &event, &iosb);
-    if (irp == NULL) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    status = IoCallDriver(LowerDevice, irp);
-    if (status == STATUS_PENDING) {
-        KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
-        status = iosb.Status;
-    }
-    if (NT_SUCCESS(status)) {
-        *Bytes = (ULONG64)info.Length.QuadPart;
-    }
-    return status;
-}
+/* 注：卷容量改由用户态查询后经 IOCTL_ENABLE 传入（见 tgshadow.h 说明）。
+   内核内用 IoBuildDeviceIoControlRequest 向卷设备发同步 IRP 会因缺少 FileObject
+   被卷/磁盘驱动解引用而崩溃(0x3B + 0xC0000005)，实测确认，故移除。 */
 
 /**
  * 为受保护卷分配影子位图。位图 1 位 = 1 个 64KB 块。
@@ -477,13 +445,14 @@ TgShadowEnable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
         return status;
     }
 
-    /* P2：查询受保护卷容量并建立影子位图 */
+    /* P2：按用户态提供的卷容量建立影子位图（内核不自行查询，见 tgshadow.h 说明） */
     {
-        ULONG64 volumeBytes = 0;
-        status = TgShadowQueryVolumeSize(g_TgShadow.LowerDevice, &volumeBytes);
-        if (!NT_SUCCESS(status)) {
-            DbgPrint("[TgShadow] query volume size failed 0x%08X\n", status);
-            return status;
+        ULONG64 volumeBytes = in->VolumeBytes;
+
+        if (volumeBytes == 0) {
+            /* 用户态未提供时的安全兜底：按 32GB 建图（宁可少标记也不越界） */
+            volumeBytes = 32ULL * 1024 * 1024 * 1024;
+            DbgPrint("[TgShadow] enable: VolumeBytes not supplied, fallback 32GB\n");
         }
         status = TgShadowAllocMap(volumeBytes);
         if (!NT_SUCCESS(status)) {
