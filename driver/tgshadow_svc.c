@@ -58,6 +58,7 @@ static DWORD g_CfgShadowMB  = 128;   /* 默认 128MB：启动期内存压力大�
 static DWORD g_CfgTimeout   = 30;
 static DWORD g_CfgDelaySec  = 120;   /* 开机后延迟启用：等系统真正起来再上保护 */
 static WCHAR g_CfgAskPath[MAX_PATH] = L"";
+static WCHAR g_CfgShadowPath[MAX_PATH] = L"";   /* 影子文件（磁盘后端）；空 = 内存后端 */
 static HANDLE g_HealthThread = NULL;
 
 /* ------------------------------------------------------------------ 日志 */
@@ -122,6 +123,20 @@ static BOOL QueryVolumeSize(DWORD vol, ULONGLONG *bytes)
     return TRUE;
 }
 
+/* 用盘符查卷容量：比 \.HarddiskVolumeN + IOCTL_DISK_GET_LENGTH_INFO 更可靠
+   （SYSTEM 会话里后者会失败，导致映射表退回 32GB 兜底，超出部分静默不受保护）。 */
+static ULONGLONG QueryVolumeSizeByDrive(WCHAR drive)
+{
+    WCHAR root[4];
+    ULARGE_INTEGER freeBytes, totalBytes, totalFree;
+
+    root[0] = drive; root[1] = L':'; root[2] = L'\\'; root[3] = 0;
+    if (!GetDiskFreeSpaceExW(root, &freeBytes, &totalBytes, &totalFree)) {
+        return 0;
+    }
+    return (ULONGLONG)totalBytes.QuadPart;
+}
+
 /* 从卷的 DOS 设备名解析卷号（会话 0 里往往拿不到，失败返回 0 = 让驱动自动识别） */
 static DWORD VolumeNumberFromDrive(WCHAR drive)
 {
@@ -144,6 +159,34 @@ static DWORD VolumeNumberFromDrive(WCHAR drive)
     return n;
 }
 
+/* 创建/扩充影子文件，返回实际字节数（0 = 失败）。主程序侧同一份逻辑见 share/shadow.py */
+static ULONGLONG EnsureShadowFile(_In_ PCWSTR Path, _In_ ULONGLONG Want)
+{
+    HANDLE        h;
+    LARGE_INTEGER sz, cur;
+
+    h = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                    OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        Log(L"打开影子文件失败 %s（错误 %lu）", Path, GetLastError());
+        return 0;
+    }
+    ZeroMemory(&cur, sizeof(cur));
+    if (GetFileSizeEx(h, &cur) && (ULONGLONG)cur.QuadPart >= Want) {
+        CloseHandle(h);
+        return (ULONGLONG)cur.QuadPart;
+    }
+    sz.QuadPart = (LONGLONG)Want;
+    if (!SetFilePointerEx(h, sz, NULL, FILE_BEGIN) || !SetEndOfFile(h)) {
+        Log(L"预分配影子文件失败 %s（错误 %lu）", Path, GetLastError());
+        CloseHandle(h);
+        return 0;
+    }
+    CloseHandle(h);
+    Log(L"影子文件已就绪：%s（%llu MB）", Path, Want / (1024ULL * 1024ULL));
+    return Want;
+}
+
 static BOOL DriverEnable(DWORD vol, DWORD mb)
 {
     TGSHADOW_ENABLE_INPUT in;
@@ -156,12 +199,50 @@ static BOOL DriverEnable(DWORD vol, DWORD mb)
         return FALSE;
     }
     ZeroMemory(&in, sizeof(in));
-    in.VolumeNumber = vol;      /* 0 = 驱动用 \SystemRoot 自动识别系统卷 */
+    in.VolumeNumber = vol;      /* 0 = 驱动用 DOS 名自动识别系统卷 */
     in.ShadowBytes  = (ULONGLONG)mb * 1024ULL * 1024ULL;
-    if (vol != 0 && QueryVolumeSize(vol, &in.VolumeBytes)) {
-        /* 已给出卷号：容量必须由用户态查询后传入（内核里查会因缺 FileObject 崩溃） */
-    } else {
-        in.VolumeBytes = 0;     /* 交给驱动兜底 */
+    /* 磁盘影子：主程序（管理界面）在注册表里配好 ShadowPath/ShadowMB，
+       这里必须把它传给驱动，否则会退化成内存影子（容量受内存限制）。 */
+    if (g_CfgShadowPath[0] != 0) {
+        ULONGLONG actual = EnsureShadowFile(g_CfgShadowPath, in.ShadowBytes);
+
+        if (actual == 0) {
+            /* ⚠️ 绝不在这种情况下退化成内存影子：内存影子容量有限，
+               用满后会"部分透传"，让卷处于半保护状态（曾因此把测试机搞成
+               无法启动）。宁可不启用保护，也不进入半保护。 */
+            Log(L"影子文件不可用（%s），本次【不启用保护】。"
+                L"请检查影子所在磁盘的可用空间（需要 %llu MB）",
+                g_CfgShadowPath, in.ShadowBytes / (1024ULL * 1024ULL));
+            CloseHandle(h);
+            return FALSE;
+        }
+        in.ShadowBytes = actual;
+        /* ⚠️ 驱动要的是 NT 路径（\??\S:\x.bin），主程序配置里是 DOS 路径（S:\x.bin）。
+           直接传 DOS 路径会得到 ERROR_BAD_PATHNAME(161)。 */
+        {
+            WCHAR nt[MAX_PATH];
+            if (_wcsnicmp(g_CfgShadowPath, L"\\??\\", 4) == 0) {
+                wcsncpy_s(nt, _countof(nt), g_CfgShadowPath, _TRUNCATE);
+            } else {
+                _snwprintf_s(nt, _countof(nt), _TRUNCATE,
+                             L"\\??\\%s", g_CfgShadowPath);
+            }
+            wcsncpy_s(in.ShadowPath, _countof(in.ShadowPath), nt, _TRUNCATE);
+            Log(L"影子路径(NT)：%s", in.ShadowPath);
+        }
+    }
+    /* 容量必须由用户态查询后传入（内核里查会因缺 FileObject 崩溃）。
+       优先按卷设备查，失败再按盘符查——SYSTEM 会话里前者经常失败，
+       一旦传 0 驱动就退回 32GB 兜底，超出部分会静默不受保护。 */
+    in.VolumeBytes = 0;
+    if (vol != 0) {
+        QueryVolumeSize(vol, &in.VolumeBytes);
+    }
+    if (in.VolumeBytes == 0) {
+        in.VolumeBytes = QueryVolumeSizeByDrive(L'C');
+    }
+    if (in.VolumeBytes == 0) {
+        Log(L"警告：无法确定受保护卷容量，映射表将由驱动按 32GB 兜底");
     }
     ok = DeviceIoControl(h, IOCTL_TGSHADOW_ENABLE, &in, sizeof(in), NULL, 0, &ret, NULL);
     if (!ok) {
@@ -223,8 +304,13 @@ static BOOL DriverEnableAuto(DWORD vol, DWORD mb)
         Log(L"警告：无法取回驱动解析出的卷号，映射表按 32GB 兜底");
         return TRUE;
     }
-    if (!QueryVolumeSize(st.TargetVolumeNumber, &bytes) || bytes == 0) {
-        Log(L"警告：查询卷 %lu 容量失败，映射表按 32GB 兜底", st.TargetVolumeNumber);
+    bytes = QueryVolumeSizeByDrive(L'C');            /* 受保护卷 = 系统卷 */
+    if (bytes == 0) {
+        bytes = 0;
+        QueryVolumeSize(st.TargetVolumeNumber, &bytes);   /* 兜底：按卷设备查 */
+    }
+    if (bytes == 0) {
+        Log(L"警告：查询受保护卷容量失败，映射表按 32GB 兜底", st.TargetVolumeNumber);
         return TRUE;
     }
     Log(L"驱动自动识别系统卷 = %lu（%llu MB），按其真实容量重建映射表",
@@ -371,6 +457,11 @@ static void LoadConfig(void)
         g_CfgDelaySec = val;
     size = sizeof(g_CfgAskPath);
     RegQueryValueExW(key, L"AskExePath", NULL, &type, (LPBYTE)g_CfgAskPath, &size);
+    size = sizeof(g_CfgShadowPath);
+    if (RegQueryValueExW(key, L"ShadowPath", NULL, &type,
+                         (LPBYTE)g_CfgShadowPath, &size) != ERROR_SUCCESS) {
+        g_CfgShadowPath[0] = 0;
+    }
 
     RegCloseKey(key);
 
