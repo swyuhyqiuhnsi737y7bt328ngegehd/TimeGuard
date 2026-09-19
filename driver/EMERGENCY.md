@@ -18,6 +18,7 @@
 | PowerShell：`找不到接受实际参数 type=` | PowerShell 里 `sc` 是 `Set-Content` 别名 | 一律用 `sc.exe` |
 | `sc start` 失败 | 未开测试签名 / 未签名 / DriverEntry 返回错误 | `bcdedit /set testsigning on` + 重启；查 DbgView 的内核日志 |
 | 修改 .sys 后无法启动 | PE 里改 hive 未 `reg unload`（最常见）；或误删引导文件 | 见下文"PE 救援" |
+| `reg query` 查不到驱动的埋点值 | **没用管理员权限**（内核创建的键普通用户读不到） | 用管理员 CMD/PowerShell 重查；确认服务已 `sc.exe start`（demand 启动，重启后不会自动加载） |
 
 ## cmd 与 PowerShell 语法混用的坑（全部实际踩过）
 
