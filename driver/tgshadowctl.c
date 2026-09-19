@@ -58,7 +58,9 @@ static void DiagnoseDriverService(void)
         if (st.dwCurrentState == SERVICE_STOPPED) {
             fprintf(stderr,
                     "       说明: 本驱动是 demand(按需) 启动，系统重启后不会自动加载\n"
-                    "       处理: 执行  sc.exe start tgshadow\n");
+                    "       处理: 执行  sc.exe start tgshadow\n"
+                    "       若 start 报 577(数字签名无法验证)：说明 .sys 被替换过但没重新签名，\n"
+                    "             运行 sign.bat 重新签名（或 vm_test.bat 一键完成）\n");
         } else if (st.dwCurrentState == SERVICE_RUNNING) {
             fprintf(stderr,
                     "       提示: 服务在跑但符号链接不存在，检查内核日志 [TgShadow] 前缀\n");
