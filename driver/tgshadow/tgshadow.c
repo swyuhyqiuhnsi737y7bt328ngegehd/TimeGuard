@@ -177,7 +177,13 @@ TgShadowMarkWriteRange(_In_ ULONG64 Offset, _In_ ULONG Length)
     ULONG64 startBlock, endBlock, i, marked = 0;
     KIRQL   irql;
 
-    if (g_TgShadow.ShadowBitmapBuffer == NULL || g_TgShadow.BlockCount == 0) {
+    /* 双保险：即便调用方刚检查过 Protected，位图也可能在这一瞬间被释放
+       （disable/卸载路径），这里必须再确认结构体本身可用 ——
+       对已释放/清零的 RTL_BITMAP 调 RtlTestBit 就是 0x3B + 0xC0000005。 */
+    if (g_TgShadow.ShadowBitmapBuffer == NULL ||
+        g_TgShadow.ShadowBitmap.Buffer == NULL ||
+        g_TgShadow.ShadowBitmap.SizeOfBitMap == 0 ||
+        g_TgShadow.BlockCount == 0) {
         return;
     }
     if (Length == 0) {
@@ -444,14 +450,26 @@ TgShadowEnable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
 
     /* P1：只做卷过滤挂载 + 标记启用；影子存储分配在 P2 实现。
        影子容量先记录，用户态负责在另一卷创建影子文件。 */
-    /* 重复 enable：先彻底清理旧状态（detach + 延迟释放位图，避免在途 IRP 访问已释放内存） */
-    if (g_TgShadow.FilterDevice != NULL || g_TgShadow.ShadowBitmapBuffer != NULL) {
-        KIRQL oldIrql;
-        KeAcquireSpinLock(&g_TgShadow.Lock, &oldIrql);
-        g_TgShadow.Protected = 0;
-        KeReleaseSpinLock(&g_TgShadow.Lock, oldIrql);
-        TgShadowDetachFromVolume();
-        TgShadowFreeMapDeferred();
+    /* 已挂载时的处理：
+         同一卷 → 只重建影子位图（先停用保护，避免在途 I/O 访问旧图）；
+         不同卷 → 拒绝，要求先 disable 并重启驱动。
+       注意：绝不在运行期 IoDetachDevice 并把 LowerDevice 置 NULL ——
+       写 IRP 线程可能刚好在检查通过之后调用 IoCallDriver(LowerDevice)，
+       拿到 NULL 就是 0x3B + 0xC0000005（已实测踩过）。 */
+    if (g_TgShadow.FilterDevice != NULL) {
+        if (g_TgShadow.TargetVolumeNumber != in->VolumeNumber) {
+            DbgPrint("[TgShadow] enable: already attached to volume %lu, "
+                     "cannot switch to %lu without reload\n",
+                     g_TgShadow.TargetVolumeNumber, in->VolumeNumber);
+            return STATUS_INVALID_PARAMETER;
+        }
+        if (g_TgShadow.ShadowBitmapBuffer != NULL) {
+            KIRQL oldIrql;
+            KeAcquireSpinLock(&g_TgShadow.Lock, &oldIrql);
+            g_TgShadow.Protected = 0;      /* 先停用，在途 I/O 不再碰位图 */
+            KeReleaseSpinLock(&g_TgShadow.Lock, oldIrql);
+            TgShadowFreeMapDeferred();     /* 延迟释放旧图 */
+        }
     }
 
     status = TgShadowAttachToVolume(in->VolumeNumber);
@@ -491,16 +509,16 @@ static NTSTATUS
 TgShadowDisable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
 {
     UNREFERENCED_PARAMETER(Stack);
-    TgShadowDetachFromVolume();
+    /* 只停用保护、不 detach：设备栈保持稳定，避免在途 I/O 拿到 NULL 下层设备。
+       真正的 detach 只在驱动卸载（TgShadowUnload）时执行。 */
     {
         KIRQL oldIrql;
         KeAcquireSpinLock(&g_TgShadow.Lock, &oldIrql);
         g_TgShadow.Protected = 0;
         KeReleaseSpinLock(&g_TgShadow.Lock, oldIrql);
     }
-    /* 先停止使用（Protected=0 + 已 detach），再延迟释放位图 */
     TgShadowFreeMapDeferred();
-    DbgPrint("[TgShadow] protection DISABLED\n");
+    DbgPrint("[TgShadow] protection DISABLED (filter stays attached)\n");
     Irp->IoStatus.Information = 0;
     return STATUS_SUCCESS;
 }
