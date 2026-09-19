@@ -132,6 +132,26 @@ TgShadowAllocMap(_In_ ULONG64 VolumeBytes)
     return STATUS_SUCCESS;
 }
 
+static VOID TgShadowFreeMap(VOID);   /* 前向声明（Deferred 需要调用） */
+
+/**
+ * 延迟释放位图：detach 之后可能仍有 in-flight 写 IRP 持有并访问位图，
+ * 立即 ExFreePool 会造成 use-after-free（PAGE_FAULT_IN_NONPAGED_AREA）。
+ * 等一小段时间让在途 I/O 走完再释放。必须在 PASSIVE_LEVEL 调用。
+ *
+ * 注：生产级实现应改为 I/O 引用计数 + 完成例程等待（P5 完善）；
+ *     当前延迟方案足以消除竞态窗口。
+ */
+static VOID
+TgShadowFreeMapDeferred(VOID)
+{
+    LARGE_INTEGER interval;
+
+    interval.QuadPart = -5000000;   /* 相对时间：500ms（单位 100ns） */
+    KeDelayExecutionThread(KernelMode, FALSE, &interval);
+    TgShadowFreeMap();
+}
+
 static VOID
 TgShadowFreeMap(VOID)
 {
@@ -424,6 +444,16 @@ TgShadowEnable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
 
     /* P1：只做卷过滤挂载 + 标记启用；影子存储分配在 P2 实现。
        影子容量先记录，用户态负责在另一卷创建影子文件。 */
+    /* 重复 enable：先彻底清理旧状态（detach + 延迟释放位图，避免在途 IRP 访问已释放内存） */
+    if (g_TgShadow.FilterDevice != NULL || g_TgShadow.ShadowBitmapBuffer != NULL) {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&g_TgShadow.Lock, &oldIrql);
+        g_TgShadow.Protected = 0;
+        KeReleaseSpinLock(&g_TgShadow.Lock, oldIrql);
+        TgShadowDetachFromVolume();
+        TgShadowFreeMapDeferred();
+    }
+
     status = TgShadowAttachToVolume(in->VolumeNumber);
     if (!NT_SUCCESS(status) && status != STATUS_ALREADY_REGISTERED) {
         return status;
@@ -432,8 +462,6 @@ TgShadowEnable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
     /* P2：查询受保护卷容量并建立影子位图 */
     {
         ULONG64 volumeBytes = 0;
-
-        TgShadowFreeMap();   /* 重复 enable 时先释放旧图 */
         status = TgShadowQueryVolumeSize(g_TgShadow.LowerDevice, &volumeBytes);
         if (!NT_SUCCESS(status)) {
             DbgPrint("[TgShadow] query volume size failed 0x%08X\n", status);
@@ -470,7 +498,8 @@ TgShadowDisable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
         g_TgShadow.Protected = 0;
         KeReleaseSpinLock(&g_TgShadow.Lock, oldIrql);
     }
-    TgShadowFreeMap();
+    /* 先停止使用（Protected=0 + 已 detach），再延迟释放位图 */
+    TgShadowFreeMapDeferred();
     DbgPrint("[TgShadow] protection DISABLED\n");
     Irp->IoStatus.Information = 0;
     return STATUS_SUCCESS;
@@ -515,7 +544,57 @@ TgShadowDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
     return status;
 }
 
-/* ------------------------------------------------------------------ 卷过滤 IRP（P1：直通 + 计数） */
+/* ------------------------------------------------------------------ 通用直通与 PnP */
+
+/**
+ * 通用直通：把 IRP 原样转给下层设备。
+ *
+ * 卷过滤驱动必须转发 PnP / Power / Flush / Shutdown / InternalDeviceControl /
+ * SystemControl —— 这些 IRP 由文件系统/卷管理器/电源管理器下发，若被过滤驱动
+ * 吞掉（返回 STATUS_INVALID_DEVICE_REQUEST 或干脆无处理），会导致卷卸载、
+ * 电源状态转换、刷新缓冲等操作失败，进而 BSOD。
+ */
+static NTSTATUS
+TgShadowPassThrough(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    if (g_TgShadow.LowerDevice == NULL) {
+        Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+    IoSkipCurrentIrpStackLocation(Irp);
+    return IoCallDriver(g_TgShadow.LowerDevice, Irp);
+}
+
+/**
+ * PnP 处理：卷被移除（IRP_MN_REMOVE_DEVICE）时必须先把自己从设备栈摘下来，
+ * 否则后续 I/O 会打到已删除的设备对象上 —— 典型 BSOD 来源。
+ */
+static NTSTATUS
+TgShadowPnp(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+
+    if (DeviceObject == g_TgShadow.FilterDevice &&
+        stack->MinorFunction == IRP_MN_REMOVE_DEVICE) {
+        DbgPrint("[TgShadow] PnP REMOVE_DEVICE: detaching filter\n");
+        if (g_TgShadow.LowerDevice != NULL) {
+            IoDetachDevice(g_TgShadow.LowerDevice);
+            g_TgShadow.LowerDevice = NULL;
+        }
+        if (g_TgShadow.FilterDevice != NULL) {
+            PDEVICE_OBJECT dying = g_TgShadow.FilterDevice;
+            g_TgShadow.FilterDevice = NULL;
+            IoDeleteDevice(dying);   /* 引用归零时才真正删除，安全 */
+        }
+    }
+    return TgShadowPassThrough(DeviceObject, Irp);
+}
+
+/* ------------------------------------------------------------------ 卷过滤 IRP（P2：直通 + 写记录） */
 
 static NTSTATUS
 TgShadowFilterReadWrite(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
@@ -564,7 +643,7 @@ TgShadowUnload(_In_ PDRIVER_OBJECT DriverObject)
              g_TgShadow.ReadCount, g_TgShadow.WriteCount);
 
     TgShadowDetachFromVolume();
-    TgShadowFreeMap();
+    TgShadowFreeMapDeferred();   /* detach 后等在途 I/O 结束再释放位图 */
 
     RtlInitUnicodeString(&linkName, L"\\??\\TgShadow");
     IoDeleteSymbolicLink(&linkName);
@@ -611,8 +690,11 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
         return status;
     }
 
+    /* 先把所有 major function 指向通用直通：卷过滤驱动必须转发
+       PnP/Power/Flush/Shutdown/InternalDeviceControl/SystemControl 等，
+       否则会破坏卷的正常生命周期（BSOD 常见来源）。再覆盖我们真正处理的。 */
     for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++) {
-        DriverObject->MajorFunction[i] = NULL;
+        DriverObject->MajorFunction[i] = TgShadowPassThrough;
     }
     DriverObject->MajorFunction[IRP_MJ_CREATE]         = TgShadowCreateClose;
     DriverObject->MajorFunction[IRP_MJ_CLOSE]          = TgShadowCreateClose;
@@ -620,6 +702,7 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = TgShadowDeviceControl;
     DriverObject->MajorFunction[IRP_MJ_READ]           = TgShadowFilterReadWrite;
     DriverObject->MajorFunction[IRP_MJ_WRITE]          = TgShadowFilterReadWrite;
+    DriverObject->MajorFunction[IRP_MJ_PNP]            = TgShadowPnp;
     DriverObject->DriverUnload = TgShadowUnload;
 
     DbgPrint("[TgShadow] control device ready: %S\n", TGSHADOW_WIN32_DEVICE);
