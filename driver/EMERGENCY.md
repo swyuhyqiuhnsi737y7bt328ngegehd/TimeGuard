@@ -19,6 +19,19 @@
 | `sc start` 失败 | 未开测试签名 / 未签名 / DriverEntry 返回错误 | `bcdedit /set testsigning on` + 重启；查 DbgView 的内核日志 |
 | 修改 .sys 后无法启动 | PE 里改 hive 未 `reg unload`（最常见）；或误删引导文件 | 见下文"PE 救援" |
 
+## cmd 与 PowerShell 语法混用的坑（全部实际踩过）
+
+在 `.bat` 里嵌 `powershell -Command "..."` 时两边语法不同，极易互相踩：
+
+| 写法 | 出错场景 | 症状 | 正确做法 |
+|---|---|---|---|
+| `^|` | 写在 `powershell -Command "..."` **双引号内** | PowerShell 报找不到参数 `^` | 双引号内直接写 `|`（`^` 只在 cmd 引号**外**用于转义） |
+| `>nul` | 同上（写在 PowerShell 命令内） | `Out-File : 要求 FileStream 打开一个不是文件的设备` | PowerShell 内用 `| Out-Null`；或把该命令挪到 bat 层执行 |
+| `sc` | 在 PowerShell 里执行 | `Set-Content : 找不到接受实际参数 type=`（`sc` 是 Set-Content 别名） | 一律写 `sc.exe` |
+| 反斜杠 | 生成 C 源码/bat 的路径 | `error C4129`（路径悄悄少一个反斜杠，如 `L"\.HarddiskVolume"`） | 生成后按字节核对 `5C` 个数，或用 `[char]92` 拼串 |
+| LF 换行 | .bat 文件 | `'xxx' is not recognized as an internal or external command`（行被截断） | .bat 必须 **CRLF** |
+| UTF-8 中文 | .bat 输出 | 控制台乱码 | bat 输出用英文；用户态程序用 `SetConsoleOutputCP(CP_UTF8)` |
+
 ## PE 救援：移除驱动服务并恢复启动
 
 前提：能用 U 盘/ISO 启动 PE，系统盘识别为 `C:`（按实际情况调整）。
