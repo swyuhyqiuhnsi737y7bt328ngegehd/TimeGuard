@@ -128,6 +128,18 @@ static int CmdStatus(HANDLE h)
     printf("读 I/O 计数   : %llu\n", st.ReadCount);
     printf("写 I/O 计数   : %llu\n", st.WriteCount);
     printf("已重定向块数  : %llu\n", st.RedirectedBlocks);
+    printf("--- P3 诊断（COW 分支）---\n");
+    printf("PASSIVE 写 I/O: %llu\n", st.WritesPassive);
+    printf("高 IRQL 写 I/O: %llu\n", st.WritesHighIrql);
+    printf("进入 COW 判定 : %llu\n", st.CowEntered);
+    printf("取不到缓冲区  : %llu\n", st.CowNoBuffer);
+    printf("写重定向成功  : %llu\n", st.CowWriteOk);
+    printf("读影子命中    : %llu\n", st.CowReadOk);
+    printf("COW 失败透传  : %llu", st.CowFailed);
+    if (st.CowFailed > 0) {
+        printf("  (最后状态 0x%08X)", st.CowLastStatus);
+    }
+    printf("\n");
     return 0;
 }
 

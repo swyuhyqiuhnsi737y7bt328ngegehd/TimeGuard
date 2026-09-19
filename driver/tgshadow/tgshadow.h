@@ -17,15 +17,19 @@
 #include <ntddk.h>
 typedef ULONG  TG_U32;
 typedef ULONG64 TG_U64;
+typedef USHORT TG_U16;
+typedef UCHAR  TG_U8;
 #else
 #include <windows.h>
-typedef unsigned int  TG_U32;
+typedef unsigned int   TG_U32;
 typedef unsigned __int64 TG_U64;
+typedef unsigned short TG_U16;
+typedef unsigned char  TG_U8;
 #endif
 
 #define TGSHADOW_VERSION_MAJOR   0
 #define TGSHADOW_VERSION_MINOR   1
-#define TGSHADOW_VERSION_STRING  L"0.1.0-p1"
+#define TGSHADOW_VERSION_STRING  L"0.1.0-p3.1"
 
 /* 设备与符号链接：用户态通过 \\.\\TgShadow 打开 */
 #define TGSHADOW_NT_DEVICE_NAME   L"\\Device\\TgShadow"
@@ -48,6 +52,16 @@ typedef struct _TGSHADOW_STATUS {
     TG_U64  ReadCount;          /* 拦截到的读 I/O 数 */
     TG_U64  WriteCount;         /* 拦截到的写 I/O 数 */
     TG_U64  RedirectedBlocks;   /* 已重定向的块数 */
+
+    /* ---- P3 诊断：COW 分支为何没进 ---- */
+    TG_U64  WritesPassive;      /* PASSIVE_LEVEL 的写 I/O 次数（COW 的前提） */
+    TG_U64  WritesHighIrql;     /* 高 IRQL 的写 I/O 次数（只能透传） */
+    TG_U64  CowEntered;         /* 进入 COW 判定的次数 */
+    TG_U64  CowNoBuffer;        /* 因取不到缓冲区而放弃 COW 的次数 */
+    TG_U64  CowWriteOk;         /* 写成功重定向到影子的次数 */
+    TG_U64  CowReadOk;          /* 读成功命中影子的次数 */
+    TG_U64  CowFailed;          /* COW 失败并落回透传的次数（>0 说明保护未生效） */
+    TG_U32  CowLastStatus;      /* 最近一次 COW 失败的 NTSTATUS */
 } TGSHADOW_STATUS, *PTGSHADOW_STATUS;
 
 /* 卷信息（IOCTL_GET_VOLUMES 返回数组元素） */
@@ -69,6 +83,11 @@ typedef struct _TGSHADOW_ENABLE_INPUT {
        必须由用户态提供：内核里用 IoBuildDeviceIoControlRequest 向卷设备发同步 IRP
        时 IRP 没有 FileObject，卷/磁盘驱动解引用它会空指针崩溃(0x3B/0xC0000005)。 */
     TG_U64  VolumeBytes;
+
+    /* P3：影子存储文件路径（NT 形式，如 \??\D:\tgshadow.bin）。
+       由用户态预先创建并预分配好容量，驱动在 enable 时打开它。
+       影子文件所在卷绝不能是被保护的卷（否则递归重定向）。 */
+    TG_U16  ShadowPath[260];
 } TGSHADOW_ENABLE_INPUT, *PTGSHADOW_ENABLE_INPUT;
 
 /* IOCTL 定义（设备类型 0x8331 = 自定义） */
