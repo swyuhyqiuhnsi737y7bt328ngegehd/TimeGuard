@@ -42,6 +42,7 @@ typedef struct _TGSHADOW_GLOBAL {
     PVOID           ShadowBitmapBuffer; /* 位图缓冲（非分页池） */
     ULONG64         VolumeBytes;        /* 受保护卷容量 */
     ULONG64         BlockCount;         /* 总块数 = VolumeBytes / BLOCK_SIZE */
+    ULONG           MarkWrites;         /* 1 = 记录写 I/O（attachonly 模式为 0） */
 } TGSHADOW_GLOBAL, *PTGSHADOW_GLOBAL;
 
 static TGSHADOW_GLOBAL g_TgShadow;
@@ -486,6 +487,17 @@ TgShadowEnable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
     }
     TgShadowTrace(L"enable: attach ok, allocating map");
 
+    /* attachonly 模式：只挂载过滤设备，完全不碰位图与写记录（分步定位用） */
+    if (in->Flags & TGSHADOW_FLAG_ATTACH_ONLY) {
+        g_TgShadow.MarkWrites = 0;
+        g_TgShadow.Protected = 1;
+        TgShadowTrace(L"enable: DONE (attach-only mode)");
+        DbgPrint("[TgShadow] ATTACH-ONLY mode enabled (no write marking)\n");
+        Irp->IoStatus.Information = 0;
+        return STATUS_SUCCESS;
+    }
+    g_TgShadow.MarkWrites = 1;
+
     /* P2：按用户态提供的卷容量建立影子位图（内核不自行查询，见 tgshadow.h 说明） */
     {
         ULONG64 volumeBytes = in->VolumeBytes;
@@ -646,7 +658,7 @@ TgShadowFilterReadWrite(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
        P3 起才把写入真正重定向到影子存储 */
     if (stack->MajorFunction == IRP_MJ_WRITE) {
         InterlockedIncrement64((volatile LONG64 *)&g_TgShadow.WriteCount);
-        if (g_TgShadow.Protected) {
+        if (g_TgShadow.Protected && g_TgShadow.MarkWrites) {
             LARGE_INTEGER off = stack->Parameters.Write.ByteOffset;
             ULONG         len = stack->Parameters.Write.Length;
             if (off.QuadPart >= 0 && len > 0) {
@@ -735,6 +747,10 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
     DriverObject->MajorFunction[IRP_MJ_WRITE]          = TgShadowFilterReadWrite;
     DriverObject->MajorFunction[IRP_MJ_PNP]            = TgShadowPnp;
     DriverObject->DriverUnload = TgShadowUnload;
+
+    /* 自检埋点：驱动加载成功即写注册表。若蓝屏后查不到任何值，
+       说明加载的不是本版本驱动（先去确认文件是否真的被覆盖）。 */
+    TgShadowTrace(L"driver loaded (version 0.1.0-p2)");
 
     DbgPrint("[TgShadow] control device ready: %S\n", TGSHADOW_WIN32_DEVICE);
     return STATUS_SUCCESS;

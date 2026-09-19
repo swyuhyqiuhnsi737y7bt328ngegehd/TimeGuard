@@ -181,13 +181,13 @@ static int QueryVolumeSize(ULONG volNum, ULONG64 *bytes)
     return 0;
 }
 
-static int CmdEnable(HANDLE h, ULONG volume, ULONG mb)
+static int CmdEnable(HANDLE h, ULONG volume, ULONG mb, int attachOnly)
 {
     TGSHADOW_ENABLE_INPUT in;
     DWORD err;
 
     in.VolumeNumber = volume;
-    in.Flags = 0;
+    in.Flags = attachOnly ? TGSHADOW_FLAG_ATTACH_ONLY : 0;
     in.ShadowBytes = (ULONG64)mb * 1024ULL * 1024ULL;
     in.VolumeBytes = 0;
     if (QueryVolumeSize(volume, &in.VolumeBytes) == 0) {
@@ -215,7 +215,8 @@ static int CmdEnable(HANDLE h, ULONG volume, ULONG mb)
         }
         return 1;
     }
-    printf("已启用保护: 卷 %lu, 影子容量 %lu MB\n", volume, mb);
+    printf("已启用保护: 卷 %lu, 影子容量 %lu MB%s\n", volume, mb,
+           attachOnly ? "  [attach-only：只挂载，不记录写]" : "");
     return 0;
 }
 
@@ -238,7 +239,8 @@ int wmain(int argc, wchar_t **argv)
     SetConsoleOutputCP(CP_UTF8);
 
     if (argc < 2) {
-        wprintf(L"用法: tgshadowctl <version|status|volumes|enable <卷号> [MB]|disable>\n");
+        wprintf(L"用法: tgshadowctl <version|status|volumes|enable <卷号> [MB] [attachonly]|disable>\n"
+                L"  enable 加 attachonly = 只挂载过滤、不记录写（分步定位用）\n");
         return 2;
     }
 
@@ -255,7 +257,9 @@ int wmain(int argc, wchar_t **argv)
     } else if (_wcsicmp(argv[1], L"enable") == 0) {
         ULONG vol = (argc >= 3) ? (ULONG)_wtoi(argv[2]) : 3;
         ULONG mb = (argc >= 4) ? (ULONG)_wtoi(argv[3]) : 32768;
-        rc = CmdEnable(h, vol, mb);
+        int attachOnly = (argc >= 5 &&
+                          _wcsicmp(argv[4], L"attachonly") == 0) ? 1 : 0;
+        rc = CmdEnable(h, vol, mb, attachOnly);
     } else if (_wcsicmp(argv[1], L"disable") == 0) {
         rc = CmdDisable(h);
     } else {

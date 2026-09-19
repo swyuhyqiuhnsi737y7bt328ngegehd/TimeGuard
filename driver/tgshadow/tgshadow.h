@@ -57,6 +57,9 @@ typedef struct _TGSHADOW_VOLUME_INFO {
     TG_U64  TotalBytes;         /* 卷容量（P1 暂填 0，P2 起用 IOCTL 查询） */
 } TGSHADOW_VOLUME_INFO, *PTGSHADOW_VOLUME_INFO;
 
+/* enable 的 Flags 位 */
+#define TGSHADOW_FLAG_ATTACH_ONLY  0x0001  /* 只挂载卷过滤、不记录写（分步定位用） */
+
 /* 启用参数（IOCTL_ENABLE） */
 typedef struct _TGSHADOW_ENABLE_INPUT {
     TG_U32  VolumeNumber;       /* 要保护的卷号 */
