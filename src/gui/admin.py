@@ -145,6 +145,12 @@ def _set_password(root, cfg):
         messagebox.showerror("TimeGuard", "两次输入不一致", parent=root)
         return False
     cfg["parent_password_hash"] = util.sha256_hex(p1)
+    # 同步给关机确认弹窗（tgshadow_ask.exe）：哈希算法一致，直接用同一个值
+    try:
+        from share import shadow as _shadow
+        _shadow.sync_parent_password(cfg)
+    except Exception:
+        pass
     return True
 
 
@@ -343,6 +349,12 @@ def _main():
     logger.info("admin 启动: 加载策略")
     cfg = policy.load()
     logger.info("admin 启动: 策略加载完成")
+    # 把家长密码哈希同步给关机确认弹窗（驱动/服务读的是注册表那份）
+    try:
+        from share import shadow as _shadow
+        _shadow.sync_parent_password(cfg)
+    except Exception as e:
+        logger.info(f"admin 启动: 同步影子密码失败（可忽略）：{e}")
     # 家长验证：独立窗口，先于主窗口（无白屏、无从属窗口挂死问题）
     if not _ask_password_standalone(cfg):
         logger.info("admin 启动: 家长验证未通过/取消，退出")
@@ -433,6 +445,97 @@ def _main():
         row=(len(restr_keys) + 2) // 3, column=0, columnspan=3, sticky="w",
         padx=10, pady=(2, 6))
 
+    # 磁盘还原（影子保护）
+    r += 1
+    sf = ttk.LabelFrame(frm, text="磁盘还原（重启还原：关机时询问是否保留本次修改）")
+    sf.grid(row=r, column=0, columnspan=5, sticky="we", padx=12, pady=6)
+    from share import shadow as _shadow
+
+    shadow_on = tk.BooleanVar(value=bool(cfg.get("shadow_enabled", False)))
+    shadow_mb = tk.IntVar(value=int(cfg.get("shadow_mb", 2048) or 2048))
+    shadow_status = tk.StringVar(value="")
+
+    def _refresh_shadow_status():
+        try:
+            if not _shadow.available():
+                shadow_status.set("驱动未就绪：请先点【安装驱动与服务】（需要管理员权限）")
+                return
+            shadow_status.set(_shadow.driver_status_text())
+        except Exception as e:                                   # pragma: no cover
+            shadow_status.set(f"读取状态失败：{e}")
+
+    def _shadow_path_hint() -> str:
+        p, free_mb = _shadow.pick_shadow_location(shadow_mb.get())
+        if not p:
+            return f"找不到可放影子的非系统盘（需要 {shadow_mb.get()} MB 以上可用空间）"
+        return f"影子文件将放在 {p}（该盘可用 {free_mb} MB）"
+
+    ttk.Checkbutton(sf, text="启用影子保护（开机后由后台服务自动启用，延迟启用避免拖慢启动）",
+                    variable=shadow_on).grid(row=0, column=0, columnspan=3,
+                                             sticky="w", padx=10, pady=(6, 2))
+    ttk.Label(sf, text="影子容量(MB):").grid(row=1, column=0, sticky="w", padx=10)
+    ttk.Spinbox(sf, from_=256, to=32768, increment=256, textvariable=shadow_mb,
+                width=8).grid(row=1, column=1, sticky="w", padx=4)
+    ttk.Label(sf, textvariable=shadow_status, font=("Microsoft YaHei", 9),
+              foreground="#2b6cb0", wraplength=520, justify="left").grid(
+        row=2, column=0, columnspan=3, sticky="w", padx=10, pady=(6, 0))
+    ttk.Label(sf, textvariable=tk.StringVar(value=_shadow_path_hint()),
+              font=("Microsoft YaHei", 8), foreground="#888", wraplength=520,
+              justify="left").grid(row=3, column=0, columnspan=3, sticky="w",
+                                   padx=10, pady=(0, 2))
+
+    sbtns = ttk.Frame(sf)
+    sbtns.grid(row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 8))
+
+    def shadow_install():
+        if not messagebox.askyesno(
+                "TimeGuard",
+                "将安装内核驱动与后台服务：\n"
+                "• 复制 tgshadow.sys 到系统驱动目录\n"
+                "• 注册为卷过滤驱动（需重启生效）\n"
+                "• 安装后台服务与关机确认程序\n\n继续？", parent=root):
+            return
+        try:
+            ok, msg = _shadow.deploy(paths.app_root())
+        except Exception as e:
+            ok, msg = False, f"安装出错：{e}"
+        (messagebox.showinfo if ok else messagebox.showerror)("TimeGuard", msg, parent=root)
+        _refresh_shadow_status()
+
+    def shadow_enable_now():
+        p, _free = _shadow.pick_shadow_location(shadow_mb.get())
+        if not p:
+            messagebox.showerror("TimeGuard", "找不到可放影子的非系统盘，无法启用。",
+                                 parent=root)
+            return
+        try:
+            mb = shadow_mb.get()
+            actual = _shadow.ensure_shadow_file(p, mb)
+            _shadow.apply_config(True, p, actual // (1024 * 1024))
+            _shadow.sync_parent_password(policy.load())
+            _shadow.enable(0, p, actual // (1024 * 1024))
+            _refresh_shadow_status()
+            messagebox.showinfo("TimeGuard",
+                                "影子保护已启用，本次开机以来的改动将在重启后自动还原。\n"
+                                "关机时选择保留修改需要输入家长密码。", parent=root)
+        except Exception as e:
+            messagebox.showerror("TimeGuard", f"启用失败：{e}", parent=root)
+
+    def shadow_disable_now():
+        try:
+            _shadow.disable()
+            _shadow.apply_config(False, "", 0)
+            _refresh_shadow_status()
+            messagebox.showinfo("TimeGuard", "已停用影子保护（改动将保留）。", parent=root)
+        except Exception as e:
+            messagebox.showerror("TimeGuard", f"停用失败：{e}", parent=root)
+
+    ttk.Button(sbtns, text="安装驱动与服务", command=shadow_install).grid(row=0, column=0, padx=4)
+    ttk.Button(sbtns, text="立即启用", command=shadow_enable_now).grid(row=0, column=1, padx=4)
+    ttk.Button(sbtns, text="停用（保留改动）", command=shadow_disable_now).grid(row=0, column=2, padx=4)
+    ttk.Button(sbtns, text="刷新状态", command=_refresh_shadow_status).grid(row=0, column=3, padx=4)
+    _refresh_shadow_status()
+
     # 按钮
     r += 1
     btns = ttk.Frame(frm)
@@ -452,6 +555,17 @@ def _main():
         ncfg["extra_minutes_per_unlock"] = max(5, extra.get())
         ncfg["tamper_penalty_minutes"] = max(0, pen.get())
         ncfg["system_restrictions"] = [k for k, v in restr_vars.items() if v.get()]
+        # 磁盘还原设置：策略里留档，同时把驱动/服务要读的配置写进注册表
+        ncfg["shadow_enabled"] = bool(shadow_on.get())
+        ncfg["shadow_mb"] = max(256, int(shadow_mb.get()))
+        try:
+            sp, _free = _shadow.pick_shadow_location(ncfg["shadow_mb"])
+            _shadow.apply_config(ncfg["shadow_enabled"], sp or "", ncfg["shadow_mb"])
+            _shadow.sync_parent_password(ncfg)
+        except Exception as e:
+            messagebox.showwarning("TimeGuard",
+                                   f"影子保护配置未能写入（可能缺少管理员权限）：{e}",
+                                   parent=root)
         try:
             _save_policy(ncfg)
         except Exception as e:

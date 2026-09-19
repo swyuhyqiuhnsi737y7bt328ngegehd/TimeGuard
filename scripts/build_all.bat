@@ -29,3 +29,20 @@ call "%~dp0build_pyinstaller.bat"
 if errorlevel 1 ( echo [ERROR] PyInstaller build failed & exit /b 1 )
 echo.
 echo All builds finished. Output in dist\ . Next: python src\main.py install
+@rem ===== 内核驱动 + 影子服务：复制到 dist\driver（deploy() 从这里取） =====
+if not exist "dist\driver" mkdir "dist\driver" 2>nul
+set "DRVSRC=driver\build\Debug"
+if not exist "%DRVSRC%\tgshadow.sys" (
+  echo [WARN] 未找到 %DRVSRC%\tgshadow.sys —— 先运行 driver\build_driver.bat
+) else (
+  copy /y "%DRVSRC%\tgshadow.sys" "dist\driver\tgshadow.sys" >nul
+  echo   已复制 tgshadow.sys
+)
+if exist "%DRVSRC%\tgshadow_svc.exe" (
+  copy /y "%DRVSRC%\tgshadow_svc.exe" "dist\driver\tgshadow_svc.exe" >nul
+  copy /y "%DRVSRC%\tgshadow_ask.exe" "dist\driver\tgshadow_ask.exe" >nul
+  echo   已复制 tgshadow_svc.exe / tgshadow_ask.exe
+) else (
+  echo [WARN] 未找到 %DRVSRC%\tgshadow_svc.exe —— 先运行 driver\build_svc.bat
+)
+@rem 注意：tgshadow.sys 必须已用受信任证书签名，否则系统会拒绝加载
