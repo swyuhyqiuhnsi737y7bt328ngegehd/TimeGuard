@@ -1,56 +1,85 @@
 @echo off
 rem ============================================================================
-rem  vm_test.bat - one-click: stop service -> sign -> load -> query
-rem  Run as Administrator. Prereq: bcdedit /set testsigning on  (then reboot)
-rem  Files in same dir: tgshadow.sys
-rem  NOTE: output is English on purpose - a UTF-8 .bat printed on a GBK console
-rem        shows mojibake, which looked like a bug of its own.
+rem  vm_test.bat [source_dir]  -  deploy + sign + load the tgshadow driver
+rem
+rem  Run as Administrator inside the VM.
+rem  Prereq: bcdedit /set testsigning on   (then reboot once)
+rem
+rem  source_dir (optional): folder containing the freshly built
+rem      tgshadow.sys / tgshadowctl.exe.
+rem    It is copied AFTER the service is stopped, because a loaded driver
+rem    LOCKS the .sys file - copying while it runs fails (Explorer may just
+rem    show an error you can miss), leaving the VM on an old build.
+rem    Example:  vm_test.bat "\\vmware-host\Shared Folders\share\Debug"
 rem ============================================================================
 setlocal
 set "DIR=%~dp0"
 set "SYS=%DIR%tgshadow.sys"
 set "SUBJECT=CN=TimeGuard Test Signing"
+set "CER=%DIR%tg.cer"
 
-if not exist "%SYS%" goto no_sys
-
-echo [1/5] Stopping and deleting old service (a loaded driver locks the .sys file)...
+echo [0/6] Stopping old service (releases the .sys file lock)...
 sc stop tgshadow >nul 2>&1
 sc delete tgshadow >nul 2>&1
 ping -n 3 127.0.0.1 >nul
 
-echo [2/5] Creating or reusing self-signed code-signing certificate...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$s='%SUBJECT%'; $c = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $s } | Select-Object -First 1; if (-not $c) { $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject $s -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(5) }; if (-not $c) { Write-Host 'ERROR: certificate creation failed'; exit 1 }; Export-Certificate -Cert $c -FilePath '%DIR%tg.cer' -Force | Out-Null; Write-Host ('cert thumbprint: ' + $c.Thumbprint)"
-if errorlevel 1 goto ps_fail
+if "%~1"=="" goto skip_copy
+echo [0/6] Copying new binaries from %~1 ...
+if not exist "%~1\tgshadow.sys" goto src_missing
+copy /y "%~1\tgshadow.sys" "%SYS%" >nul
+if exist "%~1\tgshadowctl.exe" copy /y "%~1\tgshadowctl.exe" "%DIR%tgshadowctl.exe" >nul
+echo        copied OK
+:skip_copy
 
-echo [3/5] Importing certificate into Trusted Root and Trusted Publisher...
-certutil -addstore -f Root "%DIR%tg.cer" >nul
-certutil -addstore -f TrustedPublisher "%DIR%tg.cer" >nul
+if not exist "%SYS%" goto no_sys
 
-echo [4/5] Signing driver...
+echo        current driver file:
+for %%F in ("%SYS%") do echo          %%~nxF  size=%%~zF  modified=%%~tF
+
+echo [1/6] Creating or reusing self-signed code-signing certificate...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s='%SUBJECT%'; $c = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $s } | Select-Object -First 1; if (-not $c) { $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject $s -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(5) }; if (-not $c) { Write-Host 'ERROR: certificate creation failed'; exit 1 }; Export-Certificate -Cert $c -FilePath '%CER%' -Force | Out-Null; Write-Host ('cert thumbprint: ' + $c.Thumbprint)"
+if errorlevel 1 goto cert_fail
+
+echo [2/6] Importing certificate into Trusted Root and Trusted Publisher...
+certutil -addstore -f Root "%CER%" >nul
+certutil -addstore -f TrustedPublisher "%CER%" >nul
+
+echo [3/6] Signing driver...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$s='%SUBJECT%'; $c = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq $s } | Select-Object -First 1; if (-not $c) { Write-Host 'ERROR: certificate not found'; exit 1 }; $r = Set-AuthenticodeSignature -FilePath '%SYS%' -Certificate $c; Write-Host ('sign status: ' + $r.Status); if ($r.Status -ne 'Valid') { Write-Host 'ERROR: signature invalid (file locked? stop the service first)'; exit 1 }"
 if errorlevel 1 goto sign_fail
 
-echo [5/5] Creating and starting kernel service...
+echo [4/6] Creating kernel service...
 sc create tgshadow type= kernel start= demand error= normal binPath= "%SYS%"
 if errorlevel 1 goto create_fail
+
+echo [5/6] Starting service...
 sc start tgshadow
 if errorlevel 1 goto start_fail
+
+echo [6/6] Verifying...
+sc query tgshadow | findstr /C:"STATE"
+reg query "HKLM\SOFTWARE\TimeGuard" /v TgShadowLastStep 2>nul
 echo.
-sc query tgshadow
-echo.
-echo OK. Next:  tgshadowctl.exe version ^| volumes ^| enable ^<volume^> 32768 ^| status
+echo OK. Next:
+echo    tgshadowctl.exe version
+echo    tgshadowctl.exe enable ^<volume^> 32768 attachonly    ^(safe step^)
+echo    tgshadowctl.exe status
 exit /b 0
+
+:src_missing
+echo [ERROR] %~1\tgshadow.sys not found
+exit /b 1
 
 :no_sys
 echo [ERROR] tgshadow.sys not found in current directory
 exit /b 1
 
-:ps_fail
+:cert_fail
 echo [ERROR] certificate creation failed
 exit /b 1
 
 :sign_fail
-echo [ERROR] signing failed - if the file is locked, stop the service first
+echo [ERROR] signing failed
 exit /b 1
 
 :create_fail
@@ -58,5 +87,5 @@ echo [ERROR] sc create failed
 exit /b 1
 
 :start_fail
-echo [ERROR] sc start failed - check testsigning is on and the machine was rebooted
+echo [ERROR] sc start failed - testsigning on? file signed? See EMERGENCY.md
 exit /b 1
