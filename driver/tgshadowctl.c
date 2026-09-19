@@ -163,7 +163,9 @@ static int QueryVolumeSize(ULONG volNum, ULONG64 *bytes)
     DWORD ret = 0;
 
     swprintf_s(path, 64, L"\\\\.\\\\HarddiskVolume%lu", volNum);
-    hv = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    /* 必须请求读取权限：用 0 访问权限调 IOCTL_DISK_GET_LENGTH_INFO 会返回
+       ERROR_ACCESS_DENIED(5)（实测），导致驱动只能按 32GB 兜底建位图。 */
+    hv = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                      NULL, OPEN_EXISTING, 0, NULL);
     if (hv == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "[警告] 无法打开 %ws 查询容量 (GetLastError=%lu)\n",

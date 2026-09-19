@@ -6,13 +6,13 @@
 > ⚠️ **动手前必读**：[EMERGENCY.md](EMERGENCY.md) —— 三条铁律：
 > ① 只在虚拟机里加载驱动 ② **动手前先打 VM 快照** ③ PE 里改注册表 hive 后必须 `reg unload`。
 
-## 当前进度：P1（骨架）
+## 当前进度：P2 完成（扇区级过滤已打通）
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 环境（WDK / 测试 VM / 测试签名 / 双机调试） | ✅ 完成（WDK 10.0.26100 + Win10 VM） |
 | **P1** | **控制设备 + IOCTL + 卷过滤挂载（直通 + 计数，不改数据）** | **✅ VM 验证通过** |
-| **P2** | **拦截写 I/O，用位图记录被改块（仍不重定向数据）** | **✅ 代码完成，待 VM 验证** |
+| **P2** | **拦截写 I/O，用位图记录被改块（仍不重定向数据）** | **✅ VM 验证通过**（读 36667 / 写 2027 次 I/O 被拦截；写 10MB → 重定向块 +85） |
 | P3 | COW 重定向：读改写全走影子 + 提交/丢弃 | ⏳ |
 | P4 | 用户态服务：关机确认弹窗（保留需密码）+ 开机兜底 | ⏳ |
 | P5 | 可靠性：崩溃一致性、休眠/快速启动、与 360/BitLocker 共存 | ⏳ |
@@ -24,6 +24,7 @@
     ├── tgshadow/
     │   ├── tgshadow.h       用户态/内核共享接口（IOCTL、结构体）
     │   └── tgshadow.c       P1 驱动主体（WDM 卷过滤）
+    ├── install_upperfilter.bat  注册为卷 class Upper Filter（需重启生效）
     ├── build_driver.bat     构建（cl/link 直连，兼容 VS BuildTools）
     ├── sign_test.bat        自签名测试证书 + 签名驱动
     ├── load_test.bat        创建并启动内核服务（VM 内）
@@ -37,6 +38,41 @@
 | WDK | 10.0.26100（与已装 SDK 匹配）：`winget install Microsoft.WindowsWDK.10.0.26100` |
 | 编译器 | VS2022 BuildTools（MSVC 14.4x，`vcvars64.bat`）——已就位 |
 | 测试 VM | Windows 10/11 x64（VMware），**切勿在物理机首次调试内核驱动** |
+
+## 挂载方式（关键架构决策）
+
+驱动以【卷 class 的 Upper Filter】方式挂载（与 volsnap 并列）：
+
+    HKLM\SYSTEM\CurrentControlSet\Control\Class\{71a27cdd-812a-11d0-bec7-08002be2092f}\UpperFilters
+      = volsnap \0 tgshadow
+
+**三条硬性要求**（缺一不可，全部实测踩过）：
+
+| 要求 | 原因 | 违反时的症状 |
+|---|---|---|
+| 驱动放 `%SystemRoot%\System32\drivers\` | Upper Filter 是 BOOT_START 驱动，启动早期只能访问系统盘 | 驱动加载失败 |
+| 服务 `start= boot`（0） | 卷设备在 BOOT 阶段就被 partmgr 枚举，`system`(1) 太晚 | `sc query` → STOPPED + `1077 NEVER_STARTED` |
+| UpperFilters 必须【追加】 | 默认值 `volsnap` 必须保留 | 卷影/快照功能失效 |
+
+安装：管理员运行 `install_upperfilter.bat`，然后**重启**。
+
+## 踩坑记录（三个致命错误，均有 minidump 佐证）
+
+1. **运行时动态挂载无效**：`IoAttachDevice` 挂到已挂载的卷 → 文件系统挂载时已缓存下层设备指针，
+   其 I/O 绕过过滤器（症状：读写计数恒为 0）。
+2. **`IoAttachDeviceToDeviceStack` 在运行时使用会崩**：它把设备挂到"整个栈顶"（NTFS 之上），
+   于是 `FileObject->DeviceObject` 指向非文件系统设备，`nt!IopWriteFile` 访问其卷字段时
+   空指针崩溃 —— 0x3B + 0xC0000005，反汇编证据：
+   ```
+   mov rax,[rdx+8]      ; FileObject->DeviceObject = 过滤设备（错位）
+   mov rcx,[rax+50h]    ; 取到无效字段
+   mov r14,[rcx+18h]    ; ACCESS_VIOLATION
+   ```
+3. **过滤设备必须继承卷字段**：`Vpb` / `AlignmentRequirement` / `SectorSize`，
+   否则在上述路径同样崩溃。
+
+**结论**：扇区级过滤器只能在**文件系统挂载之前**（BOOT 阶段）由 PnP 管理器经 UpperFilter 插入，
+不能运行时补挂。
 
 ## 构建
 
