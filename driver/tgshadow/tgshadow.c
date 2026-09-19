@@ -303,18 +303,51 @@ TgShadowAttachToVolume(_In_ ULONG VolumeNumber)
                                             DO_POWER_PAGABLE);
     filterDev->Flags &= ~DO_DEVICE_INITIALIZING;
 
-    TgShadowTrace(L"attach: created filter device, attaching to stack");
-    g_TgShadow.LowerDevice = IoAttachDeviceToDeviceStack(filterDev, targetDev);
+    /* ⚠️ 关键（附 dump 证据）：FileObject->DeviceObject 指向本过滤设备
+       （因为它在卷栈顶），因此 I/O 管理器/文件系统会把它当"卷设备"来用。
+       必须把目标卷的这些字段完整继承过来，否则它们为 0/NULL：
+         - Vpb                  : 卷参数块；nt!IopWriteFile 会经它取函数指针，
+                                  缺失时崩溃（mov r14,[rcx+18h]，Arg1=c0000005）
+         - AlignmentRequirement : 缓冲区对齐要求，影响 I/O 管理器缓冲计算
+         - SectorSize           : 磁盘设备扇区大小
+       崩溃现场（minidump 反汇编）：
+         mov rax,[rdx+8]      ; FileObject->DeviceObject = 本过滤设备
+         mov rcx,[rax+50h]    ; 取到无效字段
+         mov r14,[rcx+18h]    ; 💥 ACCESS_VIOLATION
+       */
+    filterDev->Vpb = targetDev->Vpb;
+    filterDev->AlignmentRequirement = targetDev->AlignmentRequirement;
+    filterDev->SectorSize = targetDev->SectorSize;
+
+    TgShadowTrace(L"attach: created filter device, attaching below NTFS");
+
+    /* ⚠️⚠️ 关键修正（dump 实证）：必须用 IoAttachDevice 而不是
+       IoAttachDeviceToDeviceStack。
+
+       卷设备栈原本是：  [NTFS 卷设备对象] -> [卷设备] -> [磁盘设备]
+       IoAttachDeviceToDeviceStack 会把过滤设备插到【整个栈的顶部】（NTFS 之上），
+       于是 Object Manager 的 IoGetAttachedDeviceReference 取栈顶时拿到我们的设备，
+       FileObject->DeviceObject 就指向一个"不是文件系统"的设备；
+       nt!IopWriteFile 随后访问它的 Vpb / 快速 I/O 表等字段 → 空指针崩溃：
+         BUGCHECK 3b / Arg1 c0000005 / SYMBOL nt!IopWriteFile+e0
+         mov rax,[rdx+8]   ; FileObject->DeviceObject = 我们的过滤设备
+         mov r14,[rcx+18h] ; 💥 rcx 来自无效字段
+
+       IoAttachDevice 按设备名把过滤设备插到【目标卷设备的直接上层】
+       （即 NTFS 之下），这才是扇区级影子该在的位置：NTFS/文件系统正常建立
+       FileObject，我们只在扇区 I/O 层面做影子重定向。 */
+    status = IoAttachDevice(filterDev, &volumeName, &g_TgShadow.LowerDevice);
 
     ObDereferenceObject(fileObj);   /* 引用已由 attach 持有 */
 
-    if (g_TgShadow.LowerDevice == NULL) {
-        DbgPrint("[TgShadow] IoAttachDeviceToDeviceStack failed\n");
-        TgShadowTrace(L"attach: IoAttachDeviceToDeviceStack FAILED");
+    if (!NT_SUCCESS(status) || g_TgShadow.LowerDevice == NULL) {
+        DbgPrint("[TgShadow] IoAttachDevice(%wZ) failed 0x%08X\n", &volumeName, status);
+        TgShadowTrace(L"attach: IoAttachDevice FAILED");
+        g_TgShadow.LowerDevice = NULL;
         IoDeleteDevice(filterDev);
-        return STATUS_UNSUCCESSFUL;
+        return NT_SUCCESS(status) ? STATUS_UNSUCCESSFUL : status;
     }
-    TgShadowTrace(L"attach: attached, filter is live");
+    TgShadowTrace(L"attach: attached below NTFS, filter is live");
 
     g_TgShadow.FilterDevice = filterDev;
     g_TgShadow.TargetVolumeNumber = VolumeNumber;
