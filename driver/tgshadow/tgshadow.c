@@ -461,11 +461,17 @@ TgShadowEnable(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
     PTGSHADOW_ENABLE_INPUT in;
     NTSTATUS status;
 
+    /* 最早埋点：只要 IOCTL_ENABLE 到达驱动就记录。
+       若蓝屏后该值仍停留在 "driver loaded"，说明 enable 根本没进驱动。 */
+    TgShadowTrace(L"enable: IOCTL received");
+
     if (Stack->Parameters.DeviceIoControl.InputBufferLength <
         sizeof(TGSHADOW_ENABLE_INPUT)) {
+        TgShadowTrace(L"enable: bad input size");
         return STATUS_BUFFER_TOO_SMALL;
     }
     in = (PTGSHADOW_ENABLE_INPUT)Irp->AssociatedIrp.SystemBuffer;
+    TgShadowTrace(L"enable: input ok, checking state");
 
     /* P1：只做卷过滤挂载 + 标记启用；影子存储分配在 P2 实现。
        影子容量先记录，用户态负责在另一卷创建影子文件。 */
