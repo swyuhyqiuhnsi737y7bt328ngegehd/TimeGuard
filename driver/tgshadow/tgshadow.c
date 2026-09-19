@@ -77,11 +77,18 @@ TgShadowTrace(_In_ PCWSTR Step)
         return;
     }
     RtlInitUnicodeString(&valueName, L"TgShadowLastStep");
+    {
+        /* 手算长度：不依赖 CRT 的 wcslen（驱动里链接 CRT 函数有隐患） */
+        ULONG len = 0;
+        while (len < 200 && Step[len] != L'\0') {
+            len++;
+        }
 #pragma warning(push)
 #pragma warning(disable: 4996)
-    ZwSetValueKey(key, &valueName, 0, REG_SZ, (PVOID)Step,
-                  (ULONG)((wcslen(Step) + 1) * sizeof(WCHAR)));
+        ZwSetValueKey(key, &valueName, 0, REG_SZ, (PVOID)Step,
+                      (ULONG)((len + 1) * sizeof(WCHAR)));
 #pragma warning(pop)
+    }
     ZwClose(key);
 }
 
@@ -350,6 +357,11 @@ TgShadowGetVersion(_In_ PIRP Irp, _In_ PIO_STACK_LOCATION Stack)
     out->VersionMajor = TGSHADOW_VERSION_MAJOR;
     out->VersionMinor = TGSHADOW_VERSION_MINOR;
     Irp->IoStatus.Information = len;
+
+    /* 自检埋点放在这里（首次 IOCTL，PASSIVE_LEVEL 安全）：
+       一旦用户跑过 version/status，注册表就会出现本条，
+       可与"驱动是否真的加载了新构建"互相印证。 */
+    TgShadowTrace(L"driver IOCTL ok (version 0.1.0-p2)");
     return STATUS_SUCCESS;
 }
 
@@ -748,9 +760,9 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
     DriverObject->MajorFunction[IRP_MJ_PNP]            = TgShadowPnp;
     DriverObject->DriverUnload = TgShadowUnload;
 
-    /* 自检埋点：驱动加载成功即写注册表。若蓝屏后查不到任何值，
-       说明加载的不是本版本驱动（先去确认文件是否真的被覆盖）。 */
-    TgShadowTrace(L"driver loaded (version 0.1.0-p2)");
+    /* 注意：DriverEntry 处于驱动加载路径，绝不做任何非必要操作
+       （注册表写入/内存分配等）——一旦失败整个驱动就加载不起来。
+       自检埋点改由首次 IOCTL 时记录。 */
 
     DbgPrint("[TgShadow] control device ready: %S\n", TGSHADOW_WIN32_DEVICE);
     return STATUS_SUCCESS;
