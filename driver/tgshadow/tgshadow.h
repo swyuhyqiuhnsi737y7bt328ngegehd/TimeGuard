@@ -62,6 +62,12 @@ typedef struct _TGSHADOW_STATUS {
     TG_U64  CowReadOk;          /* 读成功命中影子的次数 */
     TG_U64  CowFailed;          /* COW 失败并落回透传的次数（>0 说明保护未生效） */
     TG_U32  CowLastStatus;      /* 最近一次 COW 失败的 NTSTATUS */
+
+    /* ---- P4：提交 / 丢弃 ---- */
+    TG_U32  CommittedBlocks;    /* 上次提交写回真实卷的块数 */
+    TG_U32  DiscardedBlocks;    /* 上次丢弃的块数 */
+    TG_U32  LastCommitFailed;   /* 上次提交失败的块数（>0 = 提交不完整） */
+    TG_U32  PagingIo;           /* 被直接放行的分页 I/O 次数（安全阀） */
 } TGSHADOW_STATUS, *PTGSHADOW_STATUS;
 
 /* 卷信息（IOCTL_GET_VOLUMES 返回数组元素） */
@@ -73,6 +79,7 @@ typedef struct _TGSHADOW_VOLUME_INFO {
 
 /* enable 的 Flags 位 */
 #define TGSHADOW_FLAG_ATTACH_ONLY  0x0001  /* 只挂载卷过滤、不记录写（分步定位用） */
+#define TGSHADOW_FLAG_ALL_VOLUMES  0x0002  /* 对所有卷生效（仅调试；生产必须精确到单卷） */
 
 /* 启用参数（IOCTL_ENABLE） */
 typedef struct _TGSHADOW_ENABLE_INPUT {
