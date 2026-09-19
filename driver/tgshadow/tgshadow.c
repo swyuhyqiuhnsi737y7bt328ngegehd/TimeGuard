@@ -274,14 +274,17 @@ TgShadowAttachToVolume(_In_ ULONG VolumeNumber)
     RtlInitUnicodeString(&volumeName, nameBuf);
     DbgPrint("[TgShadow] opening %wZ\n", &volumeName);
 
+    TgShadowTrace(L"attach: opening volume device object");
     status = IoGetDeviceObjectPointer(&volumeName,
                                       FILE_READ_DATA | FILE_WRITE_DATA,
                                       &fileObj, &targetDev);
     if (!NT_SUCCESS(status)) {
         DbgPrint("[TgShadow] IoGetDeviceObjectPointer(%wZ) failed 0x%08X\n",
                  &volumeName, status);
+        TgShadowTrace(L"attach: open volume FAILED");
         return status;
     }
+    TgShadowTrace(L"attach: volume opened, creating filter device");
 
     /* 创建过滤设备对象（与目标设备同类型） */
     status = IoCreateDevice(g_TgShadow.ControlDevice->DriverObject,
@@ -300,15 +303,18 @@ TgShadowAttachToVolume(_In_ ULONG VolumeNumber)
                                             DO_POWER_PAGABLE);
     filterDev->Flags &= ~DO_DEVICE_INITIALIZING;
 
+    TgShadowTrace(L"attach: created filter device, attaching to stack");
     g_TgShadow.LowerDevice = IoAttachDeviceToDeviceStack(filterDev, targetDev);
 
     ObDereferenceObject(fileObj);   /* 引用已由 attach 持有 */
 
     if (g_TgShadow.LowerDevice == NULL) {
         DbgPrint("[TgShadow] IoAttachDeviceToDeviceStack failed\n");
+        TgShadowTrace(L"attach: IoAttachDeviceToDeviceStack FAILED");
         IoDeleteDevice(filterDev);
         return STATUS_UNSUCCESSFUL;
     }
+    TgShadowTrace(L"attach: attached, filter is live");
 
     g_TgShadow.FilterDevice = filterDev;
     g_TgShadow.TargetVolumeNumber = VolumeNumber;
