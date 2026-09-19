@@ -339,10 +339,29 @@ TgShadowDetachFromVolume(VOID)
 
 /* ------------------------------------------------------------------ 控制设备 IRP */
 
+static NTSTATUS TgShadowPassThrough(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp);
+
+/**
+ * IRP_MJ_CREATE / CLOSE / CLEANUP 分发。
+ *
+ * ⚠️ 致命细节（已实测踩坑，附 dump 证据）：
+ *   过滤设备挂在卷设备栈上，卷的 CREATE 请求**必须转发**给下层卷设备。
+ *   如果在这里直接 IoCompleteRequest 成功返回（像对待自己的控制设备那样），
+ *   卷的 FileObject 就不会正确建立，之后任何 WriteFile 都会在
+ *   nt!IopWriteFile 里因 FileObject 无效而 0xC0000005 崩溃：
+ *     BUGCHECK 3b / Arg1 c0000005 / SYMBOL_NAME nt!IopWriteFile+e0
+ *     PROCESS_NAME tgshadowctl.exe
+ *   栈里看不到 tgshadow，因为崩在 IRP 构建阶段、在过滤驱动被调用之前。
+ */
 static NTSTATUS
 TgShadowCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(DeviceObject);
+    /* 卷栈上的过滤设备：一律转发给下层（绝不能自己完成） */
+    if (DeviceObject == g_TgShadow.FilterDevice) {
+        return TgShadowPassThrough(DeviceObject, Irp);
+    }
+
+    /* 控制设备（\\.\TgShadow）：我们自己处理，直接成功 */
     Irp->IoStatus.Status = STATUS_SUCCESS;
     Irp->IoStatus.Information = 0;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -578,7 +597,12 @@ TgShadowDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp)
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
     NTSTATUS status;
 
-    UNREFERENCED_PARAMETER(DeviceObject);
+    /* 过滤设备上的 DEVICE_CONTROL 是卷/文件系统/安全软件的 IOCTL
+       （如卷信息查询、TRIM 等），必须原样转发；只有我们自己的控制设备
+       才处理 TGSHADOW_* 私有 IOCTL。否则会破坏卷的正常工作。 */
+    if (DeviceObject != g_TgShadow.ControlDevice) {
+        return TgShadowPassThrough(DeviceObject, Irp);
+    }
 
     switch (stack->Parameters.DeviceIoControl.IoControlCode) {
     case IOCTL_TGSHADOW_GET_VERSION:
