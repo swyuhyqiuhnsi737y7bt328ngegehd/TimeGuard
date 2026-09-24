@@ -27,18 +27,35 @@ _last_good = None
 
 
 def _merge(data: dict) -> dict:
-    cfg = dict(DEFAULTS)
-    for k in DEFAULTS:
-        if k in data and data[k] is not None:
-            cfg[k] = data[k]
+    """默认值打底 + 叠加文件内容。
+
+    ⚠️ 必须保留 DEFAULTS 之外的键，不能只挑 DEFAULTS 里的键复制：
+    admin 会把 shadow_enabled / shadow_mb（磁盘还原设置）写进 policy.json，
+    老实现读的时候把这些键丢掉，于是界面永远显示默认值 ——
+    "改了保存没反应"，而且看不出是哪儿丢的。
+    """
+    cfg = dict(data) if isinstance(data, dict) else {}
+    for k, v in DEFAULTS.items():
+        if cfg.get(k) is None:
+            cfg[k] = v
     return cfg
 
 
-def _restore_in_place(cfg: dict):
-    """把恢复出的配置写回 policy.json（就地覆写，兼容占用锁，不能用 rename）。"""
+def _restore_in_place(cfg: dict, key: str):
+    """把恢复出的配置【重新签名后】写回 policy.json。
+
+    就地覆写（policy.json 可能被 fileguard 占用锁禁止改名，不能用 rename）。
+
+    ⚠️ 必须重新签名：写回一份无签名的配置，下次加载又会验签失败 ——
+    于是打包版每次开机都报一次"配置被外部修改"，磁盘上的配置永远处于被篡改状态，
+    家长还会看到莫名其妙的告警（这正是加这个参数的修复原因）。
+    """
     try:
+        signed = configmac.sign(cfg, key) if key else cfg
         with open(paths.policy_path(), "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            json.dump(signed, f, ensure_ascii=False, indent=2)
+        if key:
+            configmac.save_backup(signed)
     except Exception as e:
         logger.warn(f"恢复配置写回失败: {e}")
 
@@ -68,7 +85,7 @@ def load() -> dict:
         if isinstance(restored, dict) and key and configmac.verify(restored, key):
             if paths.is_frozen():
                 # 仅打包版就地写回修复；源码模式不碰项目模板文件
-                _restore_in_place(restored)
+                _restore_in_place(restored, key)
             cfg = _merge(restored)
             _last_good = cfg
             return cfg

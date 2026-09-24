@@ -479,7 +479,10 @@ def _main():
     ttk.Label(sf, textvariable=shadow_status, font=("Microsoft YaHei", 9),
               foreground="#2b6cb0", wraplength=520, justify="left").grid(
         row=2, column=0, columnspan=3, sticky="w", padx=10, pady=(6, 0))
-    ttk.Label(sf, textvariable=tk.StringVar(value=_shadow_path_hint()),
+    # 必须把 StringVar 存进局部变量：直接塞进 textvariable 的话它没有任何强引用，
+    # CPython 回收时会 unset 掉同名 Tcl 变量，标签文字会变成空白。
+    shadow_hint_var = tk.StringVar(value=_shadow_path_hint())
+    ttk.Label(sf, textvariable=shadow_hint_var,
               font=("Microsoft YaHei", 8), foreground="#888", wraplength=520,
               justify="left").grid(row=3, column=0, columnspan=3, sticky="w",
                                    padx=10, pady=(0, 2))
@@ -543,14 +546,39 @@ def _main():
     ttk.Button(sbtns, text="刷新状态", command=_refresh_shadow_status).grid(row=0, column=3, padx=4)
     _refresh_shadow_status()
 
+    def _read_int(var, label, lo, hi):
+        """读 Spinbox 的整数值；读不出来（用户把框清空了）就报错返回 None。
+
+        原来是直接 var.get()：清空任一输入框再点保存会抛 TclError，
+        异常发生在 Tk 回调里被静默吞掉，打包版又没有控制台 ——
+        用户看到的就是"点了保存没反应"。
+        """
+        try:
+            v = int(var.get())
+        except Exception:
+            messagebox.showerror("TimeGuard",
+                                 f"「{label}」不是有效数字，请填写后重试。", parent=root)
+            return None
+        return max(lo, min(hi, v))
+
     # 按钮
     r += 1
     btns = ttk.Frame(frm)
     btns.grid(row=r, column=0, columnspan=5, pady=16)
 
     def save():
+        vals = {
+            "工作日配额": _read_int(q_wd, "工作日配额", 0, 1440),
+            "周末配额": _read_int(q_we, "周末配额", 0, 1440),
+            "提前提醒": _read_int(remind, "提前提醒", 0, 240),
+            "解锁加时": _read_int(extra, "解锁加时", 5, 1440),
+            "回拨惩罚": _read_int(pen, "回拨惩罚", 0, 1440),
+            "影子容量": _read_int(shadow_mb, "影子容量", 256, 32768),
+        }
+        if any(v is None for v in vals.values()):
+            return                       # 已经弹过错误框
         ncfg = policy.load()
-        ncfg["daily_quota"] = {"weekday": max(0, q_wd.get()), "weekend": max(0, q_we.get())}
+        ncfg["daily_quota"] = {"weekday": vals["工作日配额"], "weekend": vals["周末配额"]}
         ws = []
         for on, st, en in win_vars:
             if on.get():
@@ -558,13 +586,13 @@ def _main():
         ncfg["forbidden_windows"] = ws
         ncfg["enforce_action"] = act.get()
         ncfg["kill_processes"] = [x.strip() for x in kill_txt.get("1.0", "end").splitlines() if x.strip()]
-        ncfg["remind_minutes"] = max(0, remind.get())
-        ncfg["extra_minutes_per_unlock"] = max(5, extra.get())
-        ncfg["tamper_penalty_minutes"] = max(0, pen.get())
+        ncfg["remind_minutes"] = vals["提前提醒"]
+        ncfg["extra_minutes_per_unlock"] = vals["解锁加时"]
+        ncfg["tamper_penalty_minutes"] = vals["回拨惩罚"]
         ncfg["system_restrictions"] = [k for k, v in restr_vars.items() if v.get()]
         # 磁盘还原设置：策略里留档，同时把驱动/服务要读的配置写进注册表
         ncfg["shadow_enabled"] = bool(shadow_on.get())
-        ncfg["shadow_mb"] = max(256, int(shadow_mb.get()))
+        ncfg["shadow_mb"] = vals["影子容量"]
         try:
             sp, _free = _shadow.pick_shadow_location(ncfg["shadow_mb"])
             _shadow.apply_config(ncfg["shadow_enabled"], sp or "", ncfg["shadow_mb"])
@@ -578,6 +606,11 @@ def _main():
         except Exception as e:
             messagebox.showerror("TimeGuard", f"保存失败：{e}", parent=root)
             return
+        # 把刚保存的内容回写到本地 cfg：
+        # change_pwd() 用的是启动时抓取的 cfg 整体签名写盘，不回写的话
+        # "先保存设置、再改密码"会把刚保存的配额/时段/动作全部回滚掉。
+        cfg.clear()
+        cfg.update(ncfg)
         # 系统限制无需立即应用：由主控进程（core）的限制执行器按策略实时实施
         if not _ring_running():
             if messagebox.askyesno("TimeGuard",
@@ -612,8 +645,13 @@ def _main():
             messagebox.showerror("TimeGuard", f"取消失败：{e}", parent=root)
 
     def change_pwd():
-        if _set_password(root, cfg):
-            _save_policy(cfg)
+        # 关键：从磁盘重新读一份再改密码。
+        # 直接用启动时的 cfg 写盘，会把"保存设置"之后的所有改动覆盖回旧值。
+        fresh = policy.load()
+        if _set_password(root, fresh):
+            _save_policy(fresh)
+            cfg.clear()
+            cfg.update(fresh)
             messagebox.showinfo("TimeGuard", "密码已更新。", parent=root)
 
     ttk.Button(btns, text="保存设置", command=save).pack(side="left", padx=6)
