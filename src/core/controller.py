@@ -239,6 +239,7 @@ def main():
     _update_live_cfg(cfg)  # 系统功能限制执行器（不依赖注册表，core 存活期间生效）
     interval = max(2, int(cfg.get("check_interval_seconds", 5)))
     last_ts = time.time()
+    last_mono = time.monotonic()    # 计费用单调时钟：改系统时间不影响计费间隔
     last_policy_mtime = -1
     st = {"enforced": False, "reminded": False, "warned_no_pwd": False}
     tick_no = 0
@@ -272,7 +273,8 @@ def main():
             # 若等本 tick 末尾才加时，下个 tick 会因配额未变而重新锁定（解锁跳回 bug）
             _apply_extra_requests()
             now = datetime.now()
-            used, extra, _ = clock.tick(cfg, now)
+            now_ts_wall = now.timestamp()
+            used, extra, _ = clock.tick(cfg, now, mono=time.monotonic())
             quota = policy.quota_for(cfg, now)
             allowed = quota + extra
             in_forb, until = policy.forbidden_window_info(cfg, now)
@@ -289,12 +291,16 @@ def main():
                 reason = f"今日配额已用完（已用 {int(used)} / {int(allowed)} 分钟），次日 0 点重置"
                 until_ts = datetime.combine(now.date() + timedelta(days=1),
                                             datetime.min.time()).timestamp()
-            # 用量累计：仅在未被限制时计
+            # 用量累计：仅在未被限制时计。
+            # 用单调时钟算间隔：墙钟被改（孩子调系统时间）不会让这段时间凭空变大或变小，
+            # 也让"改时间 -> 计费异常"这条绕过路径失效。
+            now_mono = time.monotonic()
             if not reason and not manual_active:
-                elapsed = time.time() - last_ts
+                elapsed = clock._elapsed_seconds(now_ts_wall - last_ts, now_mono - last_mono)
                 if 0 < elapsed < interval * 4:
                     clock.accumulate(elapsed / 60.0)
-            last_ts = time.time()
+            last_ts = now_ts_wall
+            last_mono = now_mono
             if reason:
                 if not st["enforced"]:
                     logger.info(f"开始限制：{reason}")
