@@ -15,7 +15,7 @@ rem ============================================================================
 setlocal
 set "DIR=%~dp0"
 set "SYS=%DIR%tgshadow.sys"
-set "SUBJECT=CN=TimeGuard Test Signing"
+set "SUBJECT=CN=TimeGuard Debug"
 set "CER=%DIR%tg.cer"
 
 echo [0/6] Stopping old service (releases the .sys file lock)...

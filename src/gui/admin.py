@@ -492,8 +492,15 @@ def _main():
                 "TimeGuard",
                 "将安装内核驱动与后台服务：\n"
                 "• 复制 tgshadow.sys 到系统驱动目录\n"
+                "• 用自签名证书给驱动签名（本项目没买代码签名证书）\n"
                 "• 注册为卷过滤驱动（需重启生效）\n"
-                "• 安装后台服务与关机确认程序\n\n继续？", parent=root):
+                "• 安装后台服务与关机确认程序\n\n"
+                "⚠ 前提：必须已关掉驱动签名强制，否则驱动加载不了、功能静默失效：\n"
+                "  1. 管理员 CMD 执行  bcdedit /set testsigning on  然后重启；\n"
+                "     （提示受 Secure Boot 保护就先重启进 BIOS 关掉 Secure Boot）\n"
+                "  2. 关闭「Windows 安全中心 → 设备安全性 → 内核隔离 → 内存完整性」，重启；\n"
+                "  3. 代价：桌面会出现「测试模式」水印，系统不再强制驱动签名。\n\n"
+                "详细步骤见 README「六点五、磁盘还原」。现在就继续安装？", parent=root):
             return
         try:
             ok, msg = _shadow.deploy(paths.app_root())

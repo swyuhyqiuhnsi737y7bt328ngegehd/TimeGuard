@@ -20,7 +20,9 @@ r"""磁盘影子（重启还原）—— 主程序侧控制模块。
 from __future__ import annotations
 
 import ctypes
+import glob
 import os
+import shutil
 import subprocess
 import sys
 from ctypes import wintypes
@@ -452,6 +454,204 @@ def service_ask_now():
 VOLUME_CLASS_GUID = "{71a27cdd-812a-11d0-bec7-08002be2092f}"
 
 
+# ------------------------------------------------- 驱动签名（免费路线：自签名 + 测试模式）
+
+CERT_SUBJECT = "CN=TimeGuard Debug"
+_PS = "powershell.exe"
+
+
+def _certs_dir() -> str:
+    d = os.path.join(paths.state_dir(), "driver_certs")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _run(cmd, timeout=120):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="gbk", errors="ignore", timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except Exception as e:                                    # pragma: no cover
+        return 1, str(e)
+
+
+def _find_signtool():
+    """signtool 只随 Windows SDK 安装，普通用户机器上通常没有；找不到就返回 None。"""
+    hits = glob.glob(os.path.join(
+        os.environ.get("ProgramFiles(x86)", r"C:Program Files (x86)"),
+        "Windows Kits", "10", "bin", "*", "x64", "signtool.exe"))
+    if hits:
+        return sorted(hits)[-1]                    # 取版本号最大的
+    local = os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                         "TimeGuard", "signtool.exe")
+    if os.path.isfile(local):
+        return local
+    return shutil.which("signtool.exe")
+
+
+_CERT_PS_SRC = "param([string]$Subject, [string]$CerPath, [string]$Mode)\r\n$ErrorActionPreference = \"Stop\"\r\nif ($Mode -eq \"thumb\") {\r\n    $c = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object { $_.Subject -eq $Subject } | Select-Object -First 1\r\n    if ($c) { Write-Output $c.Thumbprint }\r\n    exit 0\r\n}\r\nif ($Mode -eq \"create\") {\r\n    $c = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object { $_.Subject -eq $Subject } | Select-Object -First 1\r\n    if (-not $c) {\r\n        $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject $Subject -CertStoreLocation Cert:\\CurrentUser\\My -NotAfter (Get-Date).AddYears(10)\r\n    }\r\n    if (-not $c) { Write-Error \"certificate creation failed\"; exit 1 }\r\n    Export-Certificate -Cert $c -FilePath $CerPath -Force | Out-Null\r\n    Write-Output $c.Thumbprint\r\n    exit 0\r\n}\r\nWrite-Error \"unknown mode: $Mode\"\r\nexit 2\r\n"
+
+
+def _cert_helper_path() -> str:
+    """证书辅助脚本路径（不存在时由调用方报错，不再往代码里塞内联 PowerShell）。"""
+    return os.path.join(_certs_dir(), "_tg_cert.ps1")
+
+
+def _run_cert_helper(mode: str) -> str:
+    """跑证书辅助脚本，返回其标准输出（失败返回空串）。"""
+    p = _cert_helper_path()
+    if not os.path.isfile(p):
+        # 源码树里没有这个脚本文件时，从内置文本补写一份（打包版走这里）
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(_CERT_PS_SRC)
+    rc, out = _run([_PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", p,
+                    "-Subject", CERT_SUBJECT, "-CerPath", _cer_path(),
+                    "-Mode", mode])
+    return out or ""
+
+
+def _pick_thumb(out: str) -> str:
+    """从输出里挑出 40 位十六进制指纹（输出可能夹带别的行）。"""
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if len(line) >= 40 and all(c in "0123456789abcdefABCDEF" for c in line):
+            return line
+    return ""
+
+
+def _cer_path() -> str:
+    return os.path.join(_certs_dir(), "TimeGuardDebug.cer")
+
+
+def ensure_signing_cert() -> str:
+    r"""确保存在自签名代码签名证书，返回其 SHA1 指纹（十六进制）。
+
+    用 certutil 而不是 PowerShell 的 New-SelfSignedCertificate：
+    前者所有 Windows 都自带，后者在精简系统/旧版本上可能没有。
+    """
+    thumb = _pick_thumb(_run_cert_helper("create"))
+    if thumb:
+        return thumb
+
+    cer = os.path.join(_certs_dir(), "TimeGuardDebug.cer")
+    rc, out = _run(["certutil.exe", "-user", "-f", "-createSelfSignedCertificate",
+                    CERT_SUBJECT, "-sz", "2048", "-e", "1.3.6.1.5.5.7.3.3",
+                    "-exportCert", cer])
+    if rc != 0:
+        raise RuntimeError(f"创建自签名证书失败：{out.strip()[:300]}")
+    for tok in out.split():
+        t = tok.strip().strip('"')
+        if len(t) == 40 and all(c in "0123456789abcdefABCDEF" for c in t):
+            return t
+    thumb = _pick_thumb(_run_cert_helper("thumb"))
+    if thumb:
+        return thumb
+    raise RuntimeError("创建自签名证书失败：PowerShell 与 certutil 两条路都没拿到证书指纹")
+
+
+def trust_signing_cert(thumb: str):
+    """把证书导入受信任存储，并确保【本机】存储里也有它。
+
+    两个原因：
+      • Root / TrustedPublisher 里没有它，签名链就不被信任；
+      • 内核模式驱动的签名检查走的是本机（LocalMachine）存储，而 certutil -user
+        建出来的证书只在当前用户存储里 —— 只做用户存储的话，测试模式开着也可能加载失败。
+    返回 (用户存储错误列表, 本机存储错误列表) —— 后者非空意味着内核多半不会认这个签名，
+    调用方应当据此中止，而不是装完等重启才发现加载不了。
+    """
+    cer = os.path.join(_certs_dir(), "TimeGuardDebug.cer")
+    if not os.path.isfile(cer):
+        _run([_PS, "-NoProfile", "-Command",
+              rf"Export-Certificate -Cert (Get-ChildItem Cert:\CurrentUser\My | "
+              f"Where-Object {{ $_.Thumbprint -eq '{thumb}' }}) -FilePath '{cer}' -Force"])
+    user_msgs, machine_msgs = [], []
+    for store in ("Root", "TrustedPublisher"):            # 用户存储
+        rc, out = _run(["certutil.exe", "-user", "-addstore", "-f", store, cer])
+        if rc != 0:
+            user_msgs.append(f"{store}: {out.strip()[:120]}")
+    for store in ("Root", "TrustedPublisher", "My"):      # 本机存储（内核签名检查用）
+        rc, out = _run(["certutil.exe", "-addstore", "-f", store, cer])
+        if rc != 0:
+            machine_msgs.append(f"{store}: {out.strip()[:120]}")
+    return user_msgs, machine_msgs
+
+
+def sign_driver_file(path: str, thumb: str):
+    """给驱动签名。返回 (ok, 说明)。优先 signtool，退回 PowerShell。"""
+    tool = _find_signtool()
+    if tool:
+        # 不要加 /pa：部分 signtool 版本没有这个开关（实测 10.0.26100 就报 Invalid option），
+        # 内核驱动用的是 /fd sha256 + 证书指纹，本身不需要它。
+        rc, out = _run([tool, "sign", "/fd", "sha256", "/sha1", thumb,
+                        "/s", "My", "/v", path])
+        if rc == 0:
+            return True, "signtool"
+        last = out.strip()[-300:]
+    else:
+        last = "系统里没有 signtool.exe（随 Windows SDK 安装）"
+    rc, out = _run([_PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                    rf"$c = Get-ChildItem Cert:\CurrentUser\My | Where-Object "
+                    f"{{ $_.Thumbprint -eq '{thumb}' }} | Select-Object -First 1; "
+                    f"$r = Set-AuthenticodeSignature -FilePath '{path}' "
+                    f"-Certificate $c -HashAlgorithm SHA256; "
+                    f"Write-Output ($r.Status.ToString() + ' | ' + $r.StatusMessage)"])
+    txt = (out or "").strip()
+    if rc == 0 and txt.startswith("Valid"):
+        return True, "powershell"
+    return False, f"{last}；PowerShell 兜底也失败：{txt[-300:]}"
+
+
+def verify_driver_signature(path: str):
+    rc, out = _run([_PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                    f"(Get-AuthenticodeSignature '{path}').Status"])
+    status = (out or "").strip().splitlines()[-1].strip() if out else ""
+    return status
+
+
+def test_signing_state():
+    """返回 (是否已开启测试签名模式, 说明文字)。"""
+    rc, out = _run(["bcdedit", "/enum", "{current}"])
+    low = (out or "").lower()
+    if "testsigning" in low and "yes" in low:
+        return True, "已开启"
+    return False, "未开启"
+
+
+def enable_test_signing():
+    """开启测试签名模式（需管理员 + 重启生效）。返回 (ok, 说明)。"""
+    rc, out = _run(["bcdedit", "/set", "testsigning", "on"])
+    txt = (out or "").strip()
+    if rc == 0 and ("success" in txt.lower() or "成功" in txt):
+        return True, "已开启测试签名模式（重启后生效，桌面右下角会出现「测试模式」水印）"
+    if "secure boot" in txt.lower() or "安全启动" in txt:
+        return False, ("Secure Boot 拦住了这个设置。请先重启进 BIOS/UEFI 关闭 Secure Boot，"
+                       "再回到系统执行一次。")
+    return False, f"开启失败：{txt[:300]}"
+
+
+def security_precheck():
+    """返回一组"会让自签名驱动加载不了"的警告（HVCI 等）。"""
+    import winreg
+    warns = []
+    try:
+        with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEMCurrentControlSetControlDeviceGuardScenarios"
+                r"HypervisorEnforcedCodeIntegrity") as k:
+            try:
+                if winreg.QueryValueEx(k, "Enabled")[0]:
+                    warns.append(
+                        "内存完整性（HVCI）已开启：开启测试签名模式也没用，"
+                        "自签名驱动依然会被拒绝加载。"
+                        "请到「Windows 安全中心 → 设备安全性 → 内核隔离 → 内存完整性」关掉并重启。")
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return warns
+
+
 def deploy(app_root_dir: str):
     r"""把驱动 + 服务部署到系统里（需要管理员权限）。返回 (ok, 说明文字)。
 
@@ -489,6 +689,65 @@ def deploy(app_root_dir: str):
     except OSError as e:
         return False, f"复制驱动失败：{e}\n（请以管理员身份运行本程序）"
 
+    def _cleanup_driver():
+        """部署失败时把驱动文件撤掉，别留下一个加载不了的 boot 驱动。"""
+        try:
+            os.remove(drv_dst)
+        except OSError:
+            pass
+
+    # 0) 驱动签名：Windows 只加载有有效签名的内核驱动，没有证书就自签一个。
+    #    必须在写 UpperFilters 之前做 —— 卷类的 UpperFilter 指向一个加载不了的驱动
+    #    会把卷的启动路径搞坏，而这个代价远高于"功能装不上"。
+    notes = []
+    if verify_driver_signature(drv_dst) != "Valid":
+        try:
+            thumb = ensure_signing_cert()
+        except RuntimeError as e:
+            _cleanup_driver()
+            return False, f"驱动没有有效签名，且自签名也失败：{e}"
+        user_msgs, machine_msgs = trust_signing_cert(thumb)
+        if machine_msgs:
+            # 内核驱动签名检查走本机存储；导不进去就说明当前不是管理员，
+            # 装了也无法加载 —— 此时中止，比让用户重启后发现没生效好得多。
+            _cleanup_driver()
+            return False, (
+                "把证书导入本机受信任存储失败，驱动即使签名也不会被内核接受：\n  "
+                + "\n  ".join(machine_msgs)
+                + "\n\n请以【管理员身份】重新运行 admin.exe 后再试（需要写入本机证书存储）。")
+        ok, how = sign_driver_file(drv_dst, thumb)
+        if not ok:
+            _cleanup_driver()
+            return False, f"给驱动签名失败：{how}"
+        if verify_driver_signature(drv_dst) != "Valid":
+            _cleanup_driver()
+            return False, "签名后校验仍未通过，已撤销安装（未写入卷过滤驱动注册表）"
+        notes.append(f"已用自签名证书（{CERT_SUBJECT}）签名驱动（方式：{how}）")
+        if user_msgs:
+            notes.append("证书导入用户存储有告警：" + "；".join(user_msgs))
+
+    # 0.5) 测试签名模式：自签名证书只有在"测试模式"下才被内核接受。
+    #     Secure Boot 开着会被 bcdedit 直接拒绝；HVCI 开着则连测试模式也救不了。
+    for w in security_precheck():
+        notes.append("⚠ " + w)
+    ts_on, ts_msg = test_signing_state()
+    if ts_on:
+        notes.append("测试签名模式已开启")
+    else:
+        ok_ts, msg_ts = enable_test_signing()
+        if ok_ts:
+            notes.append(msg_ts + " —— 必须重启，否则驱动加载不起来")
+        else:
+            _cleanup_driver()
+            return False, (
+                "驱动已签名，但系统当前不允许加载测试签名的驱动，安装已中止\n"
+                f"（{msg_ts}）\n\n"
+                "请按 README「六点五、磁盘还原」的步骤处理：\n"
+                "  1. 以管理员身份执行  bcdedit /set testsigning on\n"
+                "  2. 若提示被 Secure Boot 保护，先重启进 BIOS 关闭 Secure Boot\n"
+                "  3. 关闭「内核隔离 → 内存完整性」(HVCI)，否则自签名驱动仍会被拒绝\n"
+                "  4. 重启后回到本界面再点一次「安装驱动与服务」")
+
     # 1) 驱动服务
     rc, out = _sc("create", DRIVER_NAME, "type=", "kernel", "start=", "boot",
                   "binPath=", r"System32\drivers\tgshadow.sys",
@@ -513,7 +772,9 @@ def deploy(app_root_dir: str):
                 cur.append(DRIVER_NAME)
                 winreg.SetValueEx(k, "UpperFilters", 0, winreg.REG_MULTI_SZ, cur)
     except OSError as e:
-        return False, f"写入卷过滤注册表失败：{e}"
+        _sc("delete", DRIVER_NAME)        # 别留下注册了却挂不上的驱动服务
+        _cleanup_driver()
+        return False, f"写入卷过滤注册表失败：{e}\n（已回滚驱动服务与驱动文件）"
 
     # 3) 用户态服务
     for name in ("tgshadow_svc.exe", "tgshadow_ask.exe"):
@@ -531,10 +792,12 @@ def deploy(app_root_dir: str):
         svc_out = str(e)
 
     running = service_running()
+    extra = ("\n" + "\n".join("• " + n for n in notes)) if notes else ""
     return True, ("驱动与服务已部署完成。\n"
                   "• 影子保护将在下次开机后自动启用（开机 120 秒后，避免拖慢启动）\n"
                   "• 关机时会弹出确认窗口：选择【保留修改】需要家长密码，否则一律还原\n"
-                  f"• 服务状态：{'运行中' if running else '已安装，重启后生效'}\n"
+                  f"• 服务状态：{'运行中' if running else '已安装，重启后生效'}"
+                  f"{extra}\n"
                   f"• 服务安装输出：{(svc_out or '').strip()[:200]}")
 
 

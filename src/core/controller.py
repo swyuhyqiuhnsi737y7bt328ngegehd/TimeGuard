@@ -165,7 +165,7 @@ def _stop_restrictor():
 
 
 def _ensure_autostart():
-    """自愈开机自启动：注册表 HKCU Run 指向自己（core.exe）。
+    r"""自愈开机自启动：注册表 HKCU Run 指向自己（core.exe）。
 
     启动项只在注册表（非计划任务/启动文件夹）；每次启动都校正，
     避免卸载测试/路径变动后重启不再自动运行。

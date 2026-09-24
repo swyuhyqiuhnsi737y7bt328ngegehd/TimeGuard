@@ -102,7 +102,7 @@
 3. **签名 + 加载**（管理员运行 `vm_test.bat`，或手动）：
        sc.exe stop tgshadow
        sc.exe delete tgshadow
-       powershell -Command "$s='CN=TimeGuard Test Signing'; $c=Get-ChildItem Cert:\CurrentUser\My ^| ?{$_.Subject -eq $s} ^| select -First 1; Set-AuthenticodeSignature -FilePath C:\tg\tgshadow.sys -Certificate $c"
+       powershell -Command "$s='CN=TimeGuard Debug'; $c=Get-ChildItem Cert:\CurrentUser\My ^| ?{$_.Subject -eq $s} ^| select -First 1; Set-AuthenticodeSignature -FilePath C:\tg\tgshadow.sys -Certificate $c"
        sc.exe create tgshadow type= kernel start= demand error= normal binPath= C:\tg\tgshadow.sys
        sc.exe start tgshadow
    - 成功标志：`sc.exe query tgshadow` 显示 `RUNNING`
@@ -263,11 +263,41 @@ cmd 会把 `%2` 当成"第二个参数"，表达式被破坏 → PowerShell 语�
 
 | 场景 | 方案 | 成本 |
 |---|---|---|
-| VM / 自用调试 | `testsigning on` + 自签名证书（sign_test.bat 自动完成） | 免费 |
-| **分发给真实用户** | **EV 代码签名证书** + Microsoft Partner Center（$99）做 attestation 签名 | 约 ¥2000-4000/年 |
+| VM / 自用调试 | `sign_test.bat`：`testsigning on` + 自签名证书 | 免费 |
+| **分发给真实用户（本项目采用）** | **自签名证书 + 用户手动关掉驱动签名强制**（见下） | 免费，但要用户动手 |
+| 想让用户零折腾 | EV 代码签名证书 + Microsoft Partner Center attestation 签名 | 约 ¥2000-4000/年（**本项目没有买**） |
 
-没有正式签名的驱动在正常 Windows 上**无法加载**（除非用户手动开测试签名）。
-这是硬性门槛，决定本功能能否产品化。
+内核驱动没有正式签名，正常 Windows 就会拒绝加载 —— 这是硬性门槛。
+本项目**不买证书**，因此走免费路线：程序自动自签名，用户手动关掉驱动签名强制。
+
+### 免费路线的完整步骤（管理界面已自动化，这里是手工等价操作）
+
+1. 生成自签名代码签名证书并信任它：
+
+       certutil -user -f -createSelfSignedCertificate "CN=TimeGuard Debug" \
+                -sz 2048 -e 1.3.6.1.5.5.7.3.3 -exportCert tg.cer
+       certutil -user -addstore -f Root tg.cer
+       certutil -user -addstore -f TrustedPublisher tg.cer
+       certutil -addstore -f Root tg.cer            :: 本机存储也要，内核签名检查走本机
+
+2. 给驱动签名（`signtool` 随 Windows SDK 安装；没有就用 PowerShell 的 `Set-AuthenticodeSignature`）：
+
+       signtool sign /fd sha256 /sha1 <证书指纹> /pa /s My tgshadow.sys
+
+3. **关掉驱动签名强制**（三条都可能需要）：
+
+       bcdedit /set testsigning on        :: 需管理员；提示受 Secure Boot 保护就先关 Secure Boot
+
+   - **Secure Boot**：开着的话 `bcdedit` 会被拒绝 → 重启进 BIOS/UEFI 关掉；
+   - **内存完整性（HVCI）**：开着的话**测试模式也救不了**自签名驱动 →
+     Windows 安全中心 → 设备安全性 → 内核隔离 → 内存完整性 → 关；
+   - 重启。桌面右下角出现「测试模式」水印是正常的。
+
+> 证书主题名统一为 `CN=TimeGuard Debug`（`sign.bat` / `sign_test.bat` / `vm_test.bat` / `shadow.py` 一致）。
+> 签名验证的是"证书在受信任存储里 + 文件没被改过"，名字本身不重要，但要统一免得重复建证书。
+
+> 部署失败时管理界面会**明确告诉你卡在哪一步**，并且**不会**写入卷类 UpperFilters ——
+> 因为一个加载不了的 UpperFilter 指向卷设备可能影响卷的启动路径，代价远高于"功能装不上"。
 
 ## 📝 编码约定（踩过的坑）
 

@@ -16,7 +16,7 @@ rem ============================================================================
 setlocal
 set "DIR=%~dp0"
 set "SYS=%DIR%tgshadow.sys"
-set "SUBJECT=CN=TimeGuard Test Signing"
+set "SUBJECT=CN=TimeGuard Debug"
 set "CER=%DIR%tg.cer"
 
 if not exist "%SYS%" goto no_sys
