@@ -286,6 +286,8 @@ def cmd_resetpw(args):
 
 
 def main():
+    from share import util
+    util.setup_console_utf8()          # 必须在 argparse 之前：--help 里的中文也要正常
     ap = argparse.ArgumentParser(description="TimeGuard 工具")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("install")

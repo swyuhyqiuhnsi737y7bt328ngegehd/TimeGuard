@@ -22,6 +22,27 @@ def random_name(n: int = 8) -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
+def setup_console_utf8():
+    """把 Python 的标准输出切成 UTF-8，避免中文在控制台/重定向时乱码。
+
+    Windows 控制台默认代码页是 936(GBK)，Python 在 stdout 不是终端（管道/重定向）
+    时按 ANSI 代码页编码，中文会变成乱码（例："全部通过" -> "ȫ��ͨ��"），
+    而且 GBK 里没有的字符（如 emoji）会直接抛 UnicodeEncodeError。
+    与 C 侧 tgshadowctl 的 SetConsoleOutputCP(CP_UTF8) 保持一致。
+
+    必须在 argparse/print 之前调用（argparse 的 --help 中文也要走这里）。
+    只改 Python 自己的输出通道，不动控制台代码页，也不影响子进程。
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:                      # 打包成窗口程序时没有控制台
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def read_json(path, default=None):
     # utf-8-sig：兼容带 BOM 的 UTF-8 文件（记事本/PS 旧版写入可能带 BOM）
     try:

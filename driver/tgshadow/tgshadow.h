@@ -29,7 +29,9 @@ typedef unsigned char  TG_U8;
 
 #define TGSHADOW_VERSION_MAJOR   0
 #define TGSHADOW_VERSION_MINOR   1
-#define TGSHADOW_VERSION_STRING  L"0.1.0-p3.1"
+/* P4 起是磁盘影子后端；P3.1 只是首个跑通"重启还原"的内存影子版本。
+   版本串会出现在 tgshadowctl 的 status 输出里，是排障时判断"VM 里跑的是哪个构建"的依据。 */
+#define TGSHADOW_VERSION_STRING  L"0.1.0-p4"
 
 /* 设备与符号链接：用户态通过 \\.\\TgShadow 打开 */
 #define TGSHADOW_NT_DEVICE_NAME   L"\\Device\\TgShadow"
