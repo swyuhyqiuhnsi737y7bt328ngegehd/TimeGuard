@@ -501,9 +501,11 @@ def _cert_helper_path() -> str:
 def _run_cert_helper(mode: str) -> str:
     """跑证书辅助脚本，返回其标准输出（失败返回空串）。"""
     p = _cert_helper_path()
-    if not os.path.isfile(p):
-        # 源码树里没有这个脚本文件时，从内置文本补写一份（打包版走这里）
-        with open(p, "w", encoding="utf-8") as fh:
+    if not os.path.isfile(p) or os.path.getsize(p) < 200:
+        # 从内置文本补写一份（打包版走这里）。
+        # ⚠️ 必须写入 UTF-8 BOM：Windows PowerShell 5.1 读【无 BOM】的脚本会按 ANSI
+        #    (GBK) 解码，脚本里一旦出现中文（注释/提示）就会解析失败或乱码。
+        with open(p, "w", encoding="utf-8-sig", newline="") as fh:
             fh.write(_CERT_PS_SRC)
     rc, out = _run([_PS, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", p,
                     "-Subject", CERT_SUBJECT, "-CerPath", _cer_path(),
