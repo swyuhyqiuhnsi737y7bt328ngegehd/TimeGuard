@@ -31,7 +31,7 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 1. 互相监视：安装时把 guardian.exe 复制成 3 份随机名副本（如 x7k2p9q1.exe），任务管理器里名字随机、互不相同；
    - 副本数量恒定：登记表（state/guardians.json）丢失时优先回收目录里的旧副本复用，不会越积越多；
      build_all.bat 构建时也会自动清理历史遗留的随机副本；
-2. 被结束即互相启动：每个副本每 3 秒检查其它副本、core、lockscreen、fileguard 是否存活，谁死了就由同伴重新拉起；副本文件被删，就现场再造一份随机名新副本补位；
+2. 被结束即互相启动：每个副本每 1 秒检查其它副本、core、lockscreen、fileguard 是否存活，谁死了就由同伴重新拉起；副本文件被删，就现场再造一份随机名新副本补位；
 3. 最后防线：C 程序 fileguard 即使其它进程全灭，也会检测 core 死亡并直接拉起它（仅已安装模式）；
 4. 拉起去重：4 秒闸门防止多个守望者同时拉起同一进程；同名副本启动时自检去重，避免重复实例。
 
@@ -46,7 +46,7 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 
 ### 文件自我保护（占用自己）
 - fileguard.exe（C 程序）：以共享模式 FILE_SHARE_READ | FILE_SHARE_WRITE（不含 FILE_SHARE_DELETE）打开安装目录下所有 .exe 与 config/policy.json 并一直持有句柄——存活期间这些文件无法被删除/改名，但仍可正常读写、程序仍可运行。每 5 秒扫描一次，新出现的文件（如新建的随机名副本）也会被锁上；
-- Python 版兜底（share/lockfile.py）：每个进程启动时也占用自己的 exe 与策略文件；
+- Python 版兜底（share/lockfile.py）：core 启动时占用 policy.json / config.key / policy.bak；每个守护副本占用自己的 exe。lockscreen / admin 不占用文件（它们的 exe 本身已被系统映像占用）；
 - 运行中的 exe 本身被系统映像占用、天然不可删除，fileguard 补齐了进程被杀后文件依然删不掉这个空档。
 
 > 说明：这不是 rootkit。管理员权限下仍可停止进程（结束任务 / taskkill），因此卸载功能按正常流程提供。Windows Defender 可能误报自保护行为，建议在 Defender 中添加排除目录。
@@ -59,7 +59,9 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 | 共享层 | src/share/ | 路径、日志、进程枚举、单实例、文件锁(ctypes) | 随各包 |
 | 主控 | src/core/controller.py | 策略执行主循环、托盘、拉起保护组件 | core.exe |
 | 策略 | src/core/policy.py | 配额/禁止时段/密码模型 | 随包 |
-| 计时 | src/core/clock.py | 每日用量、跨天重置、防改时间 | 随包 |
+| 计时 | src/core/clock.py | 每日用量、跨天重置、防改时间、加时请求签名校验 | 随包 |
+| 完整性 | src/share/configmac.py | 配置 HMAC 签名/验签、密钥与备份的文件+注册表镜像 | 随包 |
+| 旧版限制 | src/share/policies.py | 已弃用的注册表组策略方案；生产路径只剩卸载时的 clear_all() | 随包 |
 | 执行器 | src/core/enforcer.py | 锁定/杀进程/注销/关机动作 | 随包 |
 | 守望 | src/guard/watchdog.py | 进程互守、随机名副本、拉起服务 | guardian.exe（安装时复制成随机名 x3） |
 | 锁定 | src/lock/lockscreen.py | 全屏锁定界面、密码解锁加时 | lockscreen.exe |
@@ -127,7 +129,11 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 ### 4.6 源码模式调试
     python src/main.py dev
 
-与打包版行为一致（守望副本以 python -m guard.watchdog 形式运行，随机 token 区分实例），适合改代码调试。
+守望副本以 python -m guard.watchdog 形式运行（随机 token 区分实例），适合改代码调试。
+注意与打包版的两处差异：dev 不写 installed.flag、不注册开机自启动；
+另外如果之前跑过 install/admin（写过 HKCU 的 MacKey），源码模式的 config/policy.json
+会因为缺少 mac 签名被判成"外部篡改"而从备份恢复 —— 表现为"改了配置没反应"。
+遇到这种情况：要么用 admin 保存一次让它重新签名，要么清掉 HKCU\Software\TimeGuard 下的 MacKey。
 
 ## 五、策略配置（config/policy.json）
 
@@ -144,20 +150,63 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 | check_interval_seconds | 策略检查间隔（默认 5 秒） |
 | system_restrictions | 系统功能限制列表（admin 勾选）：禁用任务管理器/注册表编辑器/命令提示符+PowerShell+Windows 终端/运行(Win+R)/控制面板与设置(Win+I)。由 core 的限制执行器实施：进程级拦截（1~2 秒内结束被禁程序）+ Win+R 键盘钩子，不依赖注册表，仅 core 运行期间生效，卸载即消失 |
 | restriction_poll_seconds | 限制执行器轮询周期（秒，默认 1）：core 每周期枚举进程并结束被禁程序的实例 |
+| shadow_enabled | 磁盘还原（影子保护）开关，默认 false。由 admin 写入；驱动/服务实际读的是 HKLM\SOFTWARE\TimeGuard\Shadow |
+| shadow_mb | 影子文件容量（MB，默认 2048）；影子文件必须放在**非受保护卷**上 |
+
+> 配置文件里还有一个 `mac` 字段（完整性签名）与 `version` 字段，由程序自动维护，
+> 不要手工编辑 —— 见下一节。
 
 > **锁定期间强制封杀破解入口**：只要处于锁定状态（配额用完/禁止时段/手动锁定），
-> 限制执行器会**无条件**结束任务管理器、cmd、PowerShell、Windows 终端、regedit
-> （不看家长是否勾选 system_restrictions），解锁后自动恢复。这是为了堵死
-> "Ctrl+Alt+Del -> 任务管理器 -> 运行新任务 -> taskkill" 这条解锁链路。
+> 限制执行器会**无条件**结束以下 11 个进程（不看家长是否勾选 system_restrictions），
+> 解锁后自动恢复（见 `share/restrictor.py` 的 `LOCKDOWN_TARGETS`）：
+>
+> `taskmgr.exe`、`cmd.exe`、`powershell.exe`、`pwsh.exe`、`wt.exe`、
+> `WindowsTerminal.exe`、`regedit.exe`、`mmc.exe`、`wscript.exe`、`cscript.exe`、`mshta.exe`。
+>
+> 这是为了堵死"Ctrl+Alt+Del -> 任务管理器 -> 运行新任务 -> taskkill 杀锁屏与守护"
+> 这条破解链路。
 
+## 五点五、完整性保护与防篡改（机制说明）
+
+家长控制的真正防线在于"孩子能不能改掉限制"。除了进程/文件自保护，还有四道数据层面的防线：
+
+| 机制 | 位置 | 防的是什么 |
+|---|---|---|
+| 配置签名 | `share/configmac.py`：`policy.json` 带 `mac` = HMAC-SHA256(密钥, 除 mac 外全部字段) | 直接编辑 policy.json 改配额/密码。验签失败 → 拒绝采用被改的值，从备份恢复 |
+| 密钥与备份镜像 | `state/config.key` + `HKCU\Software\TimeGuard\MacKey`；`state/policy.bak` + `HKCU\...\PolicyBackup` | 删掉密钥文件或备份文件。文件与注册表互为镜像，缺一个还能从另一个补齐 |
+| 加时请求签名 | `core/clock.py`：`state/extra_req.json` 必须带 HMAC | **提权通道**：core 会把里面的 minutes 直接加到当日额度。无签名/篡改/错密钥/过期/超限一律拒绝 |
+| 计时防篡改 | `core/clock.py`：`tick()` 用单调时钟校验时间连续性 | 改系统时间重置额度；`state/usage.json` 另在 `HKCU\...\UsageMirror` 有镜像，删文件/改成 0 会被顶回 |
+
+### 计时与防改时间的具体判据
+
+* 合法跨天必须同时满足：**单调时钟确实走了 ≥300 秒**，且与墙钟增量差 ≤120 秒
+  （覆盖正常午夜、睡眠/休眠恢复；NTP 校时这类微调不误报）；
+* 其余任何日期跳变（往前调、往回拨、只改墙钟）一律按篡改处理：
+  扣减 `tamper_penalty_minutes`、**保留累计用量**、篡改计数累加且跨天不清零；
+* 计费间隔也用单调时钟算，改系统时间不影响计费口径。
+
+### 信任边界（必须说清楚，不要误以为这是密码学级防护）
+
+以上机制防的是"直接编辑配置文件/删文件/改系统时间"这类**普通绕过**。
+密钥文件与注册表镜像都在同一用户权限下，孩子若能同时改写密钥与备份，仍然可以绕过 ——
+这与本项目"笨方法"的定位一致。要真正挡住，需要把密钥放到孩子无法写入的位置
+（例如管理员账户专属目录 / 独立服务）。
 ## 六、测试
 
-    python tests/smoke_test.py        # 逻辑冒烟（策略/密码/随机名）
-    python tests/test_filelock.py     # 文件锁：删除/改名被拒、可写入、释放后可删
-    python tests/integration_test.py  # 守望互拉：杀一个守望者，自动补位
-    python tests/test_restrictor.py --real   # 限制执行器测试（进程拦截链路 + Win+R 钩子安装/卸载）
+    python tests/smoke_test.py          # 逻辑冒烟（配额/禁止时段/密码/随机名）
+    python tests/test_clock.py          # 计时与防改时间（改系统时间不清零、删计时文件不重置）
+    python tests/test_extra_req.py      # 加时请求签名校验（无签名/篡改/错密钥/过期/越界全部拒绝）
+    python tests/test_policy_merge.py   # 策略合并：DEFAULTS 之外的键不许丢
+    python tests/test_configmac.py      # 配置完整性：签名、篡改恢复、备份兜底
+    python tests/test_policies.py       # 旧版注册表限制的 apply/clear 语义（默认走测试键，加 --real 才动真实键）
+    python tests/test_restrictor.py     # 限制执行器：进程拦截链路 + Win+R 钩子安装/卸载
+    python tests/test_shadow.py         # 磁盘影子：结构体布局/IOCTL 码/影子文件预分配（无驱动也能跑）
+    python tests/test_filelock.py       # 文件锁：删除/改名被拒、可写入、释放后可删
+    python tests/test_winlock.py        # 锁屏加固：任务栏隐藏/恢复、鼠标限制、键盘钩子装卸
+    python tests/integration_test.py    # 守望互拉：杀一个守望者，自动补位
 
-已在 Windows + Python 3.12 验证通过：单元冒烟 4 项、文件锁 4 项、集成互拉 4 项全过；fileguard.exe（Cygwin gcc 14 编译）实测锁定行为正确。
+以上均为**脚本式**测试（直接 python 运行，不需要 pytest），每项通过时打印 PASS。
+已在 Windows 11 + Python 3.12 验证通过；fileguard.exe（Cygwin gcc 编译）实测锁定行为正确。
 
 ## 六点五、磁盘还原（影子保护，可选功能）
 
@@ -221,7 +270,7 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
   连续启动失败并进入"自动修复"。
 * **连续失败自锁**：连续 3 轮"启用后没跑满 180 秒就重启"会停止自动启用，
   必须人工排查（删除 HKLM\SOFTWARE\TimeGuard\Shadow 下的 BootAttempts 解锁）。
-* 影子内存不得超过物理内存 25%；安全模式下绝不启用。
+* 安全模式下绝不启用（`GetSystemMetrics(SM_CLEANBOOT)`）；影子容量由用户设定、真实预分配，容量用满后不再保护（不会半透传）。
 * **还原路径下绝不能在关机前停用保护**：一旦停用，文件系统的关机刷盘会直接落到
   真实卷，本该还原的改动反而被持久化。
 
@@ -251,6 +300,13 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 - Ctrl+Alt+Del 无法被用户态程序屏蔽（系统安全注意序列）；
 - 用量按开机在线时间累计，不区分实际敲键/空闲（简单可靠）；
 - 系统休眠/睡眠造成的时长缺口不累计；
+- 防篡改是"防普通绕过"级别：密钥与备份都在同一用户权限下（见"五点五"的信任边界），
+  孩子若能同时改写 `state/config.key` 与注册表镜像仍可绕过；
+- 被禁程序改名复制（如 cmd.exe 复制成 x.exe）识别不了；
+- 日志轮转在多进程同时写时可能失败（`app.log` 被占用导致改名失败），
+  失败是静默的，极端情况下日志会持续增长；
+- 卸载时按"安装目录前缀"匹配进程，若旁边存在同前缀目录（如 TimeGuardBackup）
+  理论上可能误伤，建议安装目录名保持唯一；
 - 建议 NTFS + 给家长账户设密码。
 
 ## 八、许可证
