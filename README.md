@@ -4,7 +4,7 @@
 超时自动锁定屏幕（或结束指定进程 / 注销 / 定时关机），家长凭密码解锁加时。
 
 采用 Python 3.12 + C（Windows API）实现，模块完全分离，支持
-PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
+PyInstaller / Nuitka 两种方式打包 Python 部分；C 部分用 MinGW-w64 gcc 编译。
 
 ## 一、架构与自我保护设计
 
@@ -86,17 +86,25 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
 
 ### 3.1 环境要求
 - Python 3.9+（开发机已验证 3.12）
-- Cygwin（gcc-core 包即可，不需要 g++/libstdc++，fileguard 是纯 C）；或任意能编 Windows API 的 C 编译器
+- **MinGW-w64 gcc**（不要用 Cygwin：Cygwin 编出来的 exe 必须额外带 cygwin1.dll，在没装 Cygwin 的机器上跑不起来；MinGW-w64 编出来的是自包含 exe）
 - 网络（pip 装 PyInstaller/Nuitka/pystray/pillow）
+
+> 自动下载的便携工具链放在仓库的 `tools/`（已被 .gitignore 忽略，约 700MB 含完整 GCC）。
+> 删掉它不影响其它功能，下次构建会重新下载。
+
+C 工具链**不用手动装**：`scripts/build_cpp.bat` 会按顺序查找 gcc，
+1) 仓库内 `tools/w64devkit/bin/gcc.exe`（便携版，找不到就自动下载官方 w64devkit，无需安装、不需要管理员）；
+2) PATH 上的 gcc（会校验 `-dumpmachine` 含 mingw，Cygwin/MSYS 的会被拒绝并提示）；
+3) 常见安装位置（如 `C:\msys64\mingw64\bin`）。
 
 ### 3.2 一键构建（推荐）
 双击运行 scripts/build_all.bat，依次：
-1. Cygwin gcc 编译 dist/fileguard.exe（自动找 gcc 并复制 cygwin1.dll）；
+1. MinGW-w64 gcc 编译 dist/fileguard.exe（产物自包含，不需要额外 DLL）；
 2. PyInstaller 打包 4 个 exe 到 dist/：core / guardian / lockscreen / admin；
 3. 复制默认配置 dist/config/policy.json。
 
 ### 3.3 分开构建
-- C 部分：scripts/build_cpp.bat（gcc -O2 -s -mwindows）
+- C 部分：scripts/build_cpp.bat（MinGW-w64 gcc -O2 -s -mwindows）
 - Python 部分（PyInstaller）：scripts/build_pyinstaller.bat
 - Python 部分（Nuitka，备选）：scripts/build_nuitka.bat
 
@@ -206,7 +214,7 @@ PyInstaller / Nuitka / Cygwin gcc 三种方式打包。
     python tests/integration_test.py    # 守望互拉：杀一个守望者，自动补位
 
 以上均为**脚本式**测试（直接 python 运行，不需要 pytest），每项通过时打印 PASS。
-已在 Windows 11 + Python 3.12 验证通过；fileguard.exe（Cygwin gcc 编译）实测锁定行为正确。
+已在 Windows 11 + Python 3.12 验证通过；fileguard.exe（MinGW-w64 gcc 编译，自包含）实测锁定行为正确。
 
 ## 六点五、磁盘还原（影子保护，可选功能）
 

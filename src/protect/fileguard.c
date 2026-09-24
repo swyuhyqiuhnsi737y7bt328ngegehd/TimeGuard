@@ -1,4 +1,7 @@
-/* fileguard.c — 文件自我保护（纯 C，Cygwin gcc 编译，-mwindows 无控制台）
+/* fileguard.c — 文件自我保护（纯 C + Win32 API，MinGW-w64 gcc 编译，-mwindows 无控制台）
+ *
+ * 只用标准 Win32/CRT（windows.h/stdio.h/stdlib.h/time.h/wchar.h/string.h），
+ * 不依赖 Cygwin/MSYS 运行时 —— 编出来是自包含 exe，不需要随包分发 cygwin1.dll。
  *
  * 功能：
  *  1. 占用本目录内所有 .exe 与 config/policy.json 的句柄，共享模式不含 DELETE，
@@ -70,6 +73,16 @@ static int has_ext(const wchar_t *name, const wchar_t *ext)
     return 1;
 }
 
+static int file_exists(const wchar_t *p);
+
+/* 占用单个文件的句柄（共享模式不含 DELETE）。句柄故意不关闭：持续到进程退出。 */
+static void lock_one(const wchar_t *path)
+{
+    HANDLE h = CreateFileW(path, GENERIC_READ, SHARE_RW, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    (void)h;   /* 有意泄漏：占用句柄就是目的 */
+}
+
 static void lock_dir(void)
 {
     wchar_t pattern[MAX_PATH];
@@ -80,19 +93,27 @@ static void lock_dir(void)
     int added = 0;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (!has_ext(fd.cFileName, L".exe") && wcscmp(fd.cFileName, L"policy.json") != 0) continue;
+        if (!has_ext(fd.cFileName, L".exe")) continue;
         wchar_t path[MAX_PATH];
         wsprintfW(path, L"%ls%ls", g_dir, fd.cFileName);
         /* 关键：共享模式不含 FILE_SHARE_DELETE -> 别人无法删除/改名，
            但包含 READ|WRITE -> 别人仍可打开读写、程序仍可运行 */
-        HANDLE h = CreateFileW(path, GENERIC_READ, SHARE_RW, NULL,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h != INVALID_HANDLE_VALUE) {
-            added++;
-            /* 句柄故意不关闭：持续占用到本进程退出 */
-        }
+        lock_one(path);
+        added++;
     } while (FindNextFileW(hf, &fd));
     FindClose(hf);
+
+    /* 策略文件在 config 子目录里，而上面的通配只扫安装根目录 ——
+       原来那个 wcscmp(cFileName, L"policy.json") 分支永远命中不了，
+       "占用 policy.json" 实际上从未生效（README 却写着已保护）。
+       这里单独按完整路径占用一次。 */
+    wchar_t pol[MAX_PATH];
+    wsprintfW(pol, L"%lsconfig\\policy.json", g_dir);
+    if (file_exists(pol)) {
+        lock_one(pol);
+        added++;
+    }
+
     if (added) log_msg(L"锁定新文件");
 }
 

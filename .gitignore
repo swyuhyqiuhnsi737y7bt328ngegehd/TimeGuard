@@ -9,6 +9,9 @@ _diag_*.png
 admin_shot.png
 pw_*.png
 
+# 便携 C 工具链（w64devkit，约 64MB，由 build_cpp.bat 自动下载）
+tools/
+
 # 内核驱动构建产物与测试签名证书
 *.sys
 *.obj
