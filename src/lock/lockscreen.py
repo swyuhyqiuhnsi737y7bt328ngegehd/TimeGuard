@@ -45,9 +45,9 @@ def _unlock(top, state, entry, hint):
     cfg = policy.load()
     if policy.password_ok(cfg, pwd):
         try:
-            req = {"ts": time.time(), "minutes": int(cfg.get("extra_minutes_per_unlock", 30))}
-            util.write_json(os.path.join(paths.state_dir(), "extra_req.json"), req)
-            logger.info("密码正确，申请加时")
+            from core import clock
+            m = clock.write_extra_request(int(cfg.get("extra_minutes_per_unlock", 30)))
+            logger.info(f"密码正确，申请加时 {int(m)} 分钟")
         except Exception as e:
             logger.error(f"加时申请失败: {e}")
         enforcer_clear_lock()

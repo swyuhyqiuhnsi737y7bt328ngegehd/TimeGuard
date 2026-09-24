@@ -88,18 +88,23 @@ def _notify_startup():
 
 
 def _apply_extra_requests():
-    """处理家长加时请求（lockscreen/admin 写入 state/extra_req.json）。"""
-    p = os.path.join(paths.state_dir(), "extra_req.json")
-    req = util.read_json(p, None)
-    if not req:
+    """处理家长加时请求（lockscreen/admin 写入 state/extra_req.json）。
+
+    ⚠️ 这个文件是**提权通道**：里面写多少 minutes，core 就加多少额度。
+    所以必须带 HMAC 签名 + 时效 + 上限（见 clock.read_extra_request），
+    否则孩子一条 echo 就能让限制彻底失效。
+    无论校验成败都要删掉请求文件，避免同一个请求被反复应用。
+    """
+    p = clock.extra_req_path()
+    if not os.path.exists(p):
         return
     try:
-        if time.time() - float(req.get("ts", 0)) <= 120:
-            m = float(req.get("minutes", 30))
+        m = clock.read_extra_request()
+        if m is not None:
             clock.add_extra(m)
-            logger.info(f"家长加时 {int(m)} 分钟")
-    except Exception:
-        pass
+            logger.info(f"家长加时 {int(m)} 分钟（请求已验签）")
+    except Exception as e:
+        logger.warn(f"处理加时请求失败：{e}")
     finally:
         try:
             os.remove(p)

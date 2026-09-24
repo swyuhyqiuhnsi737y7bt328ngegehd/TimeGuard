@@ -588,11 +588,14 @@ def _main():
         messagebox.showinfo("TimeGuard", "已锁定。", parent=root)
 
     def extra_time():
-        util.write_json(os.path.join(paths.state_dir(), "extra_req.json"),
-                        {"ts": time.time(), "minutes": max(5, extra.get())})
-        from core import enforcer
+        from core import clock, enforcer
+        try:
+            m = clock.write_extra_request(max(5, extra.get()))
+        except Exception as e:
+            messagebox.showerror("TimeGuard", f"加时失败：{e}", parent=root)
+            return
         enforcer.clear_lock()
-        messagebox.showinfo("TimeGuard", f"已加时 {max(5, extra.get())} 分钟并解除锁定。", parent=root)
+        messagebox.showinfo("TimeGuard", f"已加时 {int(m)} 分钟并解除锁定。", parent=root)
 
     def cancel_shutdown():
         try:

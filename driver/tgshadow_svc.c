@@ -61,6 +61,14 @@ static WCHAR g_CfgAskPath[MAX_PATH] = L"";
 static WCHAR g_CfgShadowPath[MAX_PATH] = L"";   /* 影子文件（磁盘后端）；空 = 内存后端 */
 static HANDLE g_HealthThread = NULL;
 
+/* 关机流程已开始：用于把"关机引发的 STOP"和"家长手动 sc stop"区分开。
+   两者必须区别对待 —— 关机时必须保持保护，手动停止才该结束保护。 */
+static volatile LONG g_ShutdownInProgress = 0;
+
+/* 本轮保护真正生效的时刻（GetTickCount64/1000，0 = 没启用过）。
+   自锁清零以前挂在线程上，现在只认它：关机路径与线程状态无关。 */
+static volatile ULONGLONG g_ProtectStartTick = 0;
+
 /* ------------------------------------------------------------------ 日志 */
 
 static void Log(const WCHAR *fmt, ...)
@@ -339,6 +347,8 @@ static BOOL DriverCommit(DWORD *failedOut)
     return ok;
 }
 
+/* 预留：只有"家长明确要求现在就关掉保护"才该调用它。
+   ⚠️ 关机/停机路径【绝不能】用它 —— 那会把本该还原的改动持久化（见 HandleShutdownDecision）。 */
 static BOOL DriverDiscard(void)
 {
     HANDLE h = OpenDevice();
@@ -407,6 +417,27 @@ static BOOL HasInteractiveUser(void)
     return found;
 }
 
+static void ResetBootAttempts(void)
+{
+    WriteDword(L"BootAttempts", 0);
+}
+
+/**
+ * 本轮保护算不算"健康的一轮"（用于自锁计数）。
+ *
+ * 判据只看"从现在往回数，保护已连续生效多久"，不看线程是否还活着 ——
+ * 以前关机路径无条件清零，等于给慢速故障机开了后门：
+ * 一台"启用后 179 秒就正常关机"的机器永远自锁不了，而这正是最危险的那种形态。
+ */
+static BOOL IsHealthyRunDone(void)
+{
+    ULONGLONG start = g_ProtectStartTick;    /* volatile：先取样再算，避免中途被改 */
+
+    if (start == 0)                          /* 本轮压根没启用过保护 */
+        return FALSE;
+    return (UptimeSeconds() - start) >= (ULONGLONG)HEALTHY_SECONDS;
+}
+
 /* 保护跑满 HEALTHY_SECONDS 且期间没出问题，就算"健康的一轮"，把自锁计数清零 */
 static DWORD WINAPI HealthMonitor(LPVOID param)
 {
@@ -417,7 +448,7 @@ static DWORD WINAPI HealthMonitor(LPVOID param)
         if (WaitForSingleObject(g_StopEvent, 1000) == WAIT_OBJECT_0)
             return 0;
     }
-    WriteDword(L"BootAttempts", 0);
+    ResetBootAttempts();
     Log(L"保护已稳定运行 %d 秒，自锁计数清零（本轮安全）", HEALTHY_SECONDS);
     return 1;
 }
@@ -592,30 +623,73 @@ static BOOL AskUserKeepChanges(void)
 
 /* ------------------------------------------------------------------ 关机处理 */
 
-static void HandleShutdownDecision(void)
+/**
+ * 关机决策：问用户是否保留本次修改。
+ *
+ * ⚠️ 铁律（README「六点五」、shadow.py 顶部同样写着）：**还原路径绝不能在关机前停用保护**。
+ * 一旦 DISCARD 掉，保护就没了，而此刻离系统真正停机还有一段时间 ——
+ * NTFS 关机刷盘、延迟写线程、IRP_MJ_FLUSH_BUFFERS、注册表 hive 落盘全都绕过影子直写真实卷，
+ * 本该被还原的改动反而被持久化（症状："重启后有些东西还在"，极难排查）。
+ * 正确做法是【什么都不做】：让保护一直开到系统关闭，关机刷盘同样被重定向进影子，
+ * 影子随本次会话结束而作废 —— 这才等于还原。
+ * DISCARD 只服务于"家长明确要求现在就关掉保护"（手动停服务那条路径）。
+ */
+static void RunAskAndAct(void)
 {
-    BOOL keep;
-    DWORD failed = 0;
+    TGSHADOW_STATUS st;
 
-    Log(L"收到关机通知，开始询问是否保留本次修改");
-    keep = AskUserKeepChanges();
+    ZeroMemory(&st, sizeof(st));
+    if (!(DriverGetStatus(&st) && st.Protected)) {
+        Log(L"询问流程：当前保护未启用，无需询问");
+        return;
+    }
 
-    if (keep) {
+    if (AskUserKeepChanges()) {
+        DWORD failed = 0;
+
         if (DriverCommit(&failed)) {
             Log(L"已提交改动到真实卷（失败块数 %lu）", failed);
         } else {
             Log(L"提交失败（错误 %lu）—— 保守起见不丢弃，交回系统处理", GetLastError());
         }
     } else {
-        if (DriverDiscard()) {
-            Log(L"已丢弃本次改动，重启后恢复原状");
-        } else {
-            Log(L"丢弃失败（错误 %lu）；影子不会持久化，重启后依然是原状", GetLastError());
+        Log(L"用户选择还原：保持影子保护开启直到系统关闭，绝不在此停用保护");
+    }
+}
+
+static void HandleShutdownDecision(void)
+{
+    /* 重入保护：PRESHUTDOWN / SHUTDOWN / 后续 STOP 可能连续到达，
+       不能让弹窗跑两遍、更不能提交两遍（第二次提交时映射表已经清空）。 */
+    if (InterlockedExchange(&g_ShutdownInProgress, 1) != 0) {
+        Log(L"关机流程已在进行中，忽略重复通知");
+        return;
+    }
+
+    {
+        TGSHADOW_STATUS st;
+
+        ZeroMemory(&st, sizeof(st));
+        if (!(DriverGetStatus(&st) && st.Protected)) {
+            /* 关机而保护没启用，改动会被保留。这在"家长手动停过服务"之后是正常的，
+               但在自动启用路径上意味着本应还原的会话没被保护 —— 必须留痕，别静默发生。 */
+            Log(L"关机时保护未启用，本次改动将保留"
+                L"（若本应自动启用，请查上文的启用失败原因）");
+            return;
         }
     }
 
-    /* 走完一次完整的"启用 -> 关机决策"流程，说明这台机器扛得住，清掉自锁计数 */
-    WriteDword(L"BootAttempts", 0);
+    Log(L"收到关机通知，开始询问是否保留本次修改");
+    RunAskAndAct();
+
+    /* 自锁计数：只有"保护真的连续跑满 HEALTHY_SECONDS"才算健康的一轮。
+       以前这里无条件清零，慢速故障机（启用后没跑多久就正常关机）永远自锁不了。 */
+    if (IsHealthyRunDone()) {
+        ResetBootAttempts();
+    } else {
+        Log(L"保护未跑满 %d 秒，保留自锁计数 BootAttempts，避免慢速故障被清零后门放过",
+            HEALTHY_SECONDS);
+    }
 }
 
 /* ------------------------------------------------------------------ 服务主体 */
@@ -642,11 +716,34 @@ static DWORD WINAPI HandlerEx(DWORD control, DWORD eventType,
         return NO_ERROR;
 
     case SERVICE_CONTROL_STOP:
-        Log(L"服务控制：STOP");
+        /* ⚠️ 这里以前无条件 DriverDiscard()，直接破坏关机语义：
+           SCM 在 PRESHUTDOWN 之后【必然】再发一个 STOP，于是"用户选择还原 -> 保持保护"
+           刚做完就被这条 STOP 把保护停掉，关机刷盘照样落真实卷 —— 还原等于白做。
+           区分两种 STOP：
+             • 关机引发的（g_ShutdownInProgress 已置位）：什么都不做，
+               保护必须保持到系统关闭；提交/丢弃早在 HandleShutdownDecision 里定过了。
+             • 家长手动 sc stop：把改动提交回真实卷（手动停服务 = 保留改动），
+               而不是丢弃 —— 丢弃会让运行期间写的所有文件无提示消失。 */
+        if (InterlockedCompareExchange(&g_ShutdownInProgress, 1, 0) != 0) {
+            Log(L"服务控制：STOP（关机流程引发的收尾），保持保护不做任何提交/丢弃");
+        } else {
+            TGSHADOW_STATUS st;
+            DWORD failed = 0;
+
+            ZeroMemory(&st, sizeof(st));
+            if (DriverGetStatus(&st) && st.Protected) {
+                Log(L"服务控制：STOP（手动停止），把本次改动提交回真实卷");
+                if (DriverCommit(&failed))
+                    Log(L"手动停止：已提交改动（失败块数 %lu）", failed);
+                else
+                    Log(L"手动停止：提交失败（错误 %lu）", GetLastError());
+            } else {
+                Log(L"服务控制：STOP（手动停止），当前没有启用的保护");
+            }
+        }
         g_Status.dwCurrentState = SERVICE_STOP_PENDING;
         g_Status.dwWaitHint = 10000;
         SetServiceStatus(g_StatusHandle, &g_Status);
-        DriverDiscard();       /* 服务被停 = 不再保护，改动一律丢弃（默认安全侧） */
         SetEvent(g_StopEvent);
         return NO_ERROR;
 
@@ -659,8 +756,8 @@ static DWORD WINAPI HandlerEx(DWORD control, DWORD eventType,
            必须以 SYSTEM 身份运行才能跨会话弹窗，所以测试时用
                sc.exe control TgShadowSvc 128
            而不是直接跑 testask（普通管理员没有 SE_TCB，WTSQueryUserToken 会失败）。 */
-        Log(L"服务控制：128 = 测试一次询问流程");
-        HandleShutdownDecision();
+        Log(L"服务控制：128 = 测试一次询问流程（不影响真实关机流程，可重复调用）");
+        RunAskAndAct();
         return NO_ERROR;
 
     default:
@@ -724,6 +821,7 @@ static void WINAPI ServiceMain(DWORD argc, LPWSTR *argv)
             WriteDword(L"BootAttempts", attempts + 1);
             Log(L"开始启用保护（第 %lu 轮尝试）", attempts + 1);
             if (DriverEnableAuto(g_CfgVolume, g_CfgShadowMB)) {
+                g_ProtectStartTick = UptimeSeconds();   /* 自锁健康判定的起点 */
                 if (g_HealthThread == NULL) {
                     g_HealthThread = CreateThread(NULL, 0, HealthMonitor, NULL, 0, NULL);
                 }
