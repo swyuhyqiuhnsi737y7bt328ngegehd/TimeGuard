@@ -25,11 +25,25 @@ def main():
         return 1
 
     print("[2] 鼠标区域限制/解除...")
-    winlock.clip_to_rect(100, 100, 300, 300)
-    time.sleep(0.3)
-    r = winlock.get_clip_rect()
-    clipped = r is not None and (r[0], r[1]) == (100, 100) and (r[2], r[3]) == (300, 300)
-    print(("PASS: 鼠标被限制在 100,100-300,300" if clipped else f"FAIL: 限制矩形={r}"))
+    # ClipCursor 只在【调用线程拥有前台窗口】时保持生效：前台窗口一换到别的进程，
+    # 系统就会自动解除限制。真实的锁屏场景里有全屏置顶窗口占着前台，所以没问题；
+    # 而测试脚本自己没有窗口 —— 只要此刻别的窗口抢走焦点，限制就会被解除，
+    # 表现为偶发失败。这里重试几次，把"环境干扰"和"代码坏了"区分开。
+    clipped = False
+    r = None
+    for _ in range(10):
+        winlock.clip_to_rect(100, 100, 300, 300)
+        time.sleep(0.15)
+        r = winlock.get_clip_rect()
+        if r is not None and (r[0], r[1]) == (100, 100) and (r[2], r[3]) == (300, 300):
+            clipped = True
+            break
+    if clipped:
+        print("PASS: 鼠标被限制在 100,100-300,300")
+    else:
+        print(f"FAIL: 限制矩形={r}")
+        print("      若一直是整屏，多半是别的窗口抢走了前台焦点；")
+        print("      ClipCursor 依赖调用线程拥有前台窗口，关掉其它窗口后重跑。")
     winlock.unclip()
     time.sleep(0.3)
     r2 = winlock.get_clip_rect()

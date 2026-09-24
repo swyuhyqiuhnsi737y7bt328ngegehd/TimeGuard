@@ -29,6 +29,27 @@ def _save_policy(cfg):
     configmac.save_backup(signed)
 
 
+def _fit_and_center(win, pad_w: int = 40, pad_h: int = 60):
+    """按内容自然尺寸定窗口大小并居中显示（在内容构建完之后调用）。
+
+    为什么不用固定的 "380x190"：固定尺寸是"猜"出来的，换字体/换 DPI/加一行
+    文案就会被裁；而 Tk 自己知道内容需要多大（winfo_req*），照它来最稳。
+    """
+    try:
+        win.update_idletasks()
+        kids = win.winfo_children()
+        need_w = max([c.winfo_reqwidth() for c in kids] or [win.winfo_reqwidth()])
+        need_h = sum(c.winfo_reqheight() for c in kids) or win.winfo_reqheight()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        w = min(max(need_w + pad_w, 300), max(300, sw - 60))
+        h = min(max(need_h + pad_h, 150), max(150, sh - 80))
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        win.geometry(f"{w}x{h}+{x}+{y}")
+    except Exception:
+        pass
+
+
 def _prompt_password(root, title, prompt):
     """模态密码输入框：可聚焦、可输入、文字自动换行。返回输入内容或 None（取消）。"""
     dlg = tk.Toplevel(root)
@@ -39,18 +60,6 @@ def _prompt_password(root, title, prompt):
         root.update_idletasks()  # 确保主窗口尺寸已计算，避免对话框位置错乱
     except Exception:
         pass
-    w, h = 380, 190
-    try:
-        if root.state() == "withdrawn":
-            # 主窗口隐藏时（验证阶段）：对话框按屏幕居中
-            x = max(0, (root.winfo_screenwidth() - w) // 2)
-            y = max(0, (root.winfo_screenheight() - h) // 2)
-        else:
-            x = root.winfo_rootx() + max(0, (root.winfo_width() - w) // 2)
-            y = root.winfo_rooty() + max(0, (root.winfo_height() - h) // 2)
-    except Exception:
-        x = y = 100
-    dlg.geometry(f"{w}x{h}+{x}+{y}")
     dlg.resizable(False, False)
     dlg.transient(root)
     result = {"val": None}
@@ -70,6 +79,16 @@ def _prompt_password(root, title, prompt):
     btns.pack(pady=8)
     tk.Button(btns, text="确定", width=8, command=ok).pack(side="left", padx=8)
     tk.Button(btns, text="取消", width=8, command=cc).pack(side="left", padx=8)
+    _fit_and_center(dlg, pad_w=36, pad_h=48)
+    # 主窗口可见时贴着它居中，更符合"对话框属于这个窗口"的直觉
+    try:
+        if root.state() != "withdrawn":
+            dw = dlg.winfo_width() or dlg.winfo_reqwidth()
+            dh = dlg.winfo_height() or dlg.winfo_reqheight()
+            dlg.geometry(f"+{max(0, root.winfo_rootx() + (root.winfo_width() - dw) // 2)}"
+                         f"+{max(0, root.winfo_rooty() + (root.winfo_height() - dh) // 2)}")
+    except Exception:
+        pass
     dlg.bind("<Return>", lambda e: ok())
     dlg.bind("<Escape>", lambda e: cc())
     dlg.protocol("WM_DELETE_WINDOW", cc)
@@ -93,9 +112,6 @@ def _ask_password_standalone(cfg) -> bool:
     top.title("家长验证")
     top.attributes("-topmost", True)
     top.configure(bg="#f5f6fa")
-    w, h = 380, 190
-    sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
-    top.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2)}")
     top.resizable(False, False)
     result = {"val": None}
     tk.Label(top, text="请输入家长密码：", font=("Microsoft YaHei", 10), bg="#f5f6fa",
@@ -104,6 +120,8 @@ def _ask_password_standalone(cfg) -> bool:
     entry.pack(padx=18, pady=6)
     err = tk.Label(top, text="", font=("Microsoft YaHei", 9), fg="#c33", bg="#f5f6fa")
     err.pack()
+
+    _fit_and_center(top)
 
     def ok():
         pwd = entry.get()
@@ -203,9 +221,6 @@ def _quit_mode():
         top.title("退出 TimeGuard")
         top.attributes("-topmost", True)
         top.configure(bg="#f5f6fa")
-        w, h = 400, 220
-        sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
-        top.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2)}")
         top.resizable(False, False)
         tk.Label(top, text="输入家长密码确认退出\n（退出后保护停止，需重新启动才能恢复）",
                  font=("Microsoft YaHei", 10), bg="#f5f6fa", fg="#333",
@@ -238,6 +253,7 @@ def _quit_mode():
             top.grab_set()
         except Exception:
             pass
+        _fit_and_center(top)
         top.focus_force()
         entry.focus_set()
         top.mainloop()
@@ -363,13 +379,54 @@ def _main():
     root = tk.Tk()
     logger.info("admin 启动: 主窗口创建完成")
     root.title("TimeGuard 家长控制")
-    root.geometry("620x880")
     root.configure(bg="#f5f6fa")
     root.withdraw()  # 构建期间隐藏，构建完立即显示（防白屏）
 
+    # 尺寸策略：不要写死几何尺寸。
+    # 原来固定 620x880，而表单是 5 列 grid，自然宽度超过 620px：
+    # 右边被裁（"周末:" 后面的输入框消失），底部按钮也露不出来。
+    # 现在按内容自然尺寸布局，只在超过屏幕时才收缩，并让内容可滚动。
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    max_w, max_h = max(420, sw - 80), max(360, sh - 120)
+
     pad = {"padx": 12, "pady": 6}
-    frm = ttk.Frame(root)
-    frm.pack(fill="both", expand=True, padx=16, pady=10)
+    outer = ttk.Frame(root)
+    outer.pack(fill="both", expand=True)
+    canvas = tk.Canvas(outer, highlightthickness=0, bg="#f5f6fa")
+    vbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vbar.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    vbar.pack(side="right", fill="y")
+    frm = ttk.Frame(canvas)
+    _win = canvas.create_window((0, 0), window=frm, anchor="nw")
+
+    def _sync_scroll(_e=None):
+        """让内容宽度跟随画布，并在需要时才显示滚动条。"""
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            need = frm.winfo_reqheight() > canvas.winfo_height()
+            if need and not vbar.winfo_ismapped():
+                vbar.pack(side="right", fill="y")
+            elif not need and vbar.winfo_ismapped():
+                vbar.pack_forget()
+        except Exception:
+            pass
+
+    def _on_canvas_resize(e):
+        try:
+            canvas.itemconfigure(_win, width=e.width)
+        except Exception:
+            pass
+        _sync_scroll()
+
+    canvas.bind("<Configure>", _on_canvas_resize)
+    frm.bind("<Configure>", _sync_scroll)
+
+    def _on_wheel(e):
+        if vbar.winfo_ismapped():
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+    root.bind_all("<MouseWheel>", _on_wheel)
 
     # 配额
     r = 0
@@ -654,12 +711,22 @@ def _main():
             cfg.update(fresh)
             messagebox.showinfo("TimeGuard", "密码已更新。", parent=root)
 
-    ttk.Button(btns, text="保存设置", command=save).pack(side="left", padx=6)
-    ttk.Button(btns, text="立即锁定", command=lock_now).pack(side="left", padx=6)
-    ttk.Button(btns, text="加时并解锁", command=extra_time).pack(side="left", padx=6)
-    ttk.Button(btns, text="取消定时关机", command=cancel_shutdown).pack(side="left", padx=6)
-    ttk.Button(btns, text="修改密码", command=change_pwd).pack(side="left", padx=6)
-    ttk.Button(btns, text="卸载并退出", command=lambda: _uninstall(root)).pack(side="left", padx=6)
+    # 按钮用 grid 排（不用 pack side=left）：窗口窄的时候能自动换行，
+    # 原来一排 pack 到底，窗口不够宽时后面的按钮直接排到窗口外看不见。
+    _btn_defs = [
+        ("保存设置", save),
+        ("立即锁定", lock_now),
+        ("加时并解锁", extra_time),
+        ("取消定时关机", cancel_shutdown),
+        ("修改密码", change_pwd),
+        ("卸载并退出", lambda: _uninstall(root)),
+    ]
+    _per_row = 3
+    for _i, (_t, _cmd) in enumerate(_btn_defs):
+        ttk.Button(btns, text=_t, command=_cmd).grid(
+            row=_i // _per_row, column=_i % _per_row, padx=6, pady=4, sticky="w")
+    for _c in range(_per_row):
+        btns.columnconfigure(_c, weight=1)
 
     logger.info("admin 启动: 表单构建完成")
 
@@ -669,8 +736,20 @@ def _main():
                             "尚未设置家长密码，时间限制不会生效。\n"
                             "点击下方“修改密码”按钮即可设置。", parent=root)
 
+    # 构建完成后再定尺寸：此时 winfo_reqwidth/reqheight 才是真实的内容尺寸。
+    # 只设上限不设下限（"想要多大"），避免把内容压扁导致文字被截断。
+    try:
+        root.update_idletasks()
+        w = min(frm.winfo_reqwidth() + 40, max_w)
+        h = min(frm.winfo_reqheight() + 30, max_h)
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 3)
+        root.geometry(f"{w}x{h}+{x}+{y}")
+        root.minsize(min(w, 520), min(h, 420))
+    except Exception as e:
+        logger.warn(f"自适应窗口尺寸失败（用默认尺寸）：{e}")
     root.deiconify()
-    logger.info("admin 启动: 主窗口已显示")
+    _sync_scroll()
     root.mainloop()
     logger.info("admin 退出")
 
