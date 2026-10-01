@@ -387,10 +387,19 @@ _k32.GetLastError.restype = wintypes.DWORD
 
 
 def single_instance(name: str) -> bool:
-    """同名互斥体：返回 False 表示已有实例在运行。"""
+    """同名互斥体：返回 False 表示已有实例在运行。
+
+    ⚠️ 必须用 ctypes.get_last_error()，不能调 kernel32!GetLastError。
+    _k32 是用 use_last_error=True 打开的，ctypes 会把错误码存在它自己的私有副本里，
+    而 CreateMutexW 与取错误码之间还夹着参数转换等 ctypes 调用 ——
+    直接调 GetLastError() 读到的可能不是 CreateMutexW 的结果。
+    后果很实在：重复实例被放行（实测机器上 core.exe / lockscreen.exe 各跑了 2 个），
+    多个主控同时累计用量、同时判定锁定，用量会翻倍。
+    """
+    ctypes.set_last_error(0)
     h = _k32.CreateMutexW(None, True, r"Local\TimeGuard_" + name)
     if not h:
         return True  # 未知错误，放行
-    if _k32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
         return False
     return True

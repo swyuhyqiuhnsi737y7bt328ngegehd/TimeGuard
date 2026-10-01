@@ -33,9 +33,21 @@ def _save_registry(r):
     util.write_json(_registry_path(), r)
 
 
-def _spawn_gate() -> bool:
-    """拉新进程前先抢“闸门”：4 秒内只放行一个。"""
-    p = os.path.join(paths.state_dir(), "spawn_lock")
+def _spawn_gate(target: str = "any") -> bool:
+    """拉新进程前先抢"闸门"：同一目标 4 秒内只放行一个拉起动作。
+
+    ⚠️ 必须【按目标分开】。全局共用一个闸门时，ensure_guardians 抢到之后
+    ensure_service('core') 就被一起挡住，core 被杀后的补位会迟 4 秒 ——
+    那是保护空窗期，不能接受。
+
+    ⚠️ 必须"每次真正要拉进程之前"才抢，不能只在 ensure_guardians 开头抢一次：
+    3 个守望者每秒都在跑同一套逻辑，而拉起一个 core.exe 需要 1~3 秒才出现在
+    进程列表里 —— 这期间其它守望者看到的仍然是"core 不存在"，于是重复拉起。
+    实机症状：core.exe / lockscreen.exe 各有 2 个实例（多个主控同时累计用量）。
+    原先只有 ensure_guardians 用了闸门，ensure_service 完全没保护。
+    """
+    safe = re.sub(r"[^a-z0-9_.-]", "_", str(target).lower())[:32] or "any"
+    p = os.path.join(paths.state_dir(), "spawn_lock_" + safe)
     try:
         if os.path.exists(p) and time.time() - os.path.getmtime(p) < SPAWN_GATE_SECONDS:
             return False
@@ -58,17 +70,25 @@ def ensure_fileguard():
         return
     if util.find_pid_by_name("fileguard.exe"):
         return
+    if not _spawn_gate("fileguard"):
+        return
     util.spawn([exe])
 
 
 def ensure_service(name: str, exe_name: str, module: str):
-    """确保一个常驻服务进程（core/lockscreen）在运行，死了就拉起。"""
+    """确保一个常驻服务进程（core/lockscreen）在运行，死了就拉起。
+
+    拉起前必须过闸门：多个守望者同时判定"目标不在"是常态（新进程要 1~3 秒
+    才出现在进程列表里），没有闸门就会重复拉起出多个实例。
+    """
     if paths.is_frozen():
         exe = os.path.join(paths.app_root(), exe_name)
         if not os.path.exists(exe):
             return
         if util.find_pid_by_name(exe_name):
             return
+        if not _spawn_gate(name):
+            return                      # 别的守望者刚拉过，等下一轮再看
         util.spawn([exe])
     else:
         try:
@@ -76,6 +96,8 @@ def ensure_service(name: str, exe_name: str, module: str):
         except Exception:
             pid = 0
         if pid and util.process_alive(pid, "python.exe"):
+            return
+        if not _spawn_gate(name):
             return
         util.spawn([sys.executable, "-m", module], env=_py_env())
 
@@ -115,8 +137,6 @@ def _orphan_copies():
 
 def ensure_guardians():
     """保证 GUARDIAN_COUNT 个守望副本在运行；缺哪个拉起哪个，缺副本文件就回收/新造随机名副本。"""
-    if not _spawn_gate():
-        return
     if paths.is_frozen():
         reg = _load_registry()
         copies = [p for p in reg.get("copies", []) if os.path.exists(p)]
@@ -131,7 +151,8 @@ def ensure_guardians():
             if util.find_pid_by_name(os.path.basename(p)):
                 live += 1
                 continue
-            util.spawn([p])  # 拉起被结束的同伴（乐观计数，下轮校验）
+            if _spawn_gate("guardian"):
+                util.spawn([p])  # 拉起被结束的同伴（乐观计数，下轮校验）
             live += 1
         copies = [p for p in copies if os.path.exists(p)]
         if live < GUARDIAN_COUNT:
@@ -141,7 +162,8 @@ def ensure_guardians():
                 if live >= GUARDIAN_COUNT:
                     break
                 copies.append(p)
-                util.spawn([p])
+                if _spawn_gate("guardian"):
+                    util.spawn([p])
                 live += 1
         if live < GUARDIAN_COUNT:
             seed = os.path.join(paths.app_root(), "guardian.exe")
@@ -157,7 +179,8 @@ def ensure_guardians():
                     logger.error(f"创建守望副本失败: {e}")
                     break
                 copies.append(newp)
-                util.spawn([newp])
+                if _spawn_gate("guardian"):
+                    util.spawn([newp])
         reg["copies"] = copies
         _save_registry(reg)
     else:
