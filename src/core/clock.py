@@ -124,6 +124,23 @@ def _save(u):
         pass
 
 
+def _boot_id() -> int:
+    """本次开机的标识（Windows: 开机时刻的 Unix 秒；取不到返回 0）。
+
+    为什么需要它：time.monotonic() 每次开机都从头开始（Windows 上是开机以来的秒数），
+    所以【跨重启比较 last_mono 毫无意义】—— 会算出负的增量，把正常情况误判成改时间。
+    把它和 monoton 一起存下来，只有 boot_id 相同才信任这个增量。
+    """
+    try:
+        import ctypes
+        ms = ctypes.c_ulonglong(0)
+        if ctypes.windll.kernel32.GetTickCount64(ctypes.byref(ms)):
+            return int(time.time() - ms.value / 1000.0)
+    except Exception:
+        pass
+    return 0
+
+
 def _elapsed_seconds(wall_jump: float, mono_jump: float) -> float:
     """这一轮主循环真正过了多久（秒）。
 
@@ -135,15 +152,19 @@ def _elapsed_seconds(wall_jump: float, mono_jump: float) -> float:
     return min(mono_jump, wall_jump) if wall_jump >= 0 else mono_jump
 
 
-def tick(policy: dict, now: datetime, mono=None):
+def tick(policy: dict, now: datetime, mono=None, boot=None):
     """每次主循环调用。返回 (used_minutes, extra_minutes, tamper_count)。
 
     ⚠️ 铁律：**任何日期跳变都不允许把用量清零**。
     老实现是"日期 != 今天 → 整体重建 used/extra/tamper"，而回拨检测写在它后面，
     于是"把系统时间改成明天"就能让当日额度清零、连篡改计数一起抹掉 ——
     改一次时间 = 额度满血 + 无惩罚，防改时间功能形同虚设。
-    现在改成：只有"单调时钟确实也走了至少 MIN_DAY_ROLLOVER_SECONDS、且与墙钟
-    增量一致"才认定为合法跨天；其余日期变化一律按篡改处理：扣减惩罚、保留用量。
+    现在改成：只有【墙钟与单调时钟同步前进】（两者增量差在容差内）才认定为合法跨天；
+    其余日期变化一律按篡改处理：扣减惩罚、保留用量。
+
+    ⚠️ 别再加"单调时钟必须走过 N 秒"这类条件：正常跨天时最后一次 tick 就在几秒前，
+    单调时钟只走了几秒 —— 加了它就会【每个午夜都误判成改时间】并白扣惩罚
+    （实机日志：00:00:04 检测到系统日期被改动，今日额度扣减 60 分钟）。
     """
     u = load_usage()
     today = now.strftime("%Y-%m-%d")
@@ -151,8 +172,13 @@ def tick(policy: dict, now: datetime, mono=None):
     mono_now = time.monotonic() if mono is None else float(mono)
     pre_ts = float(u.get("last_ts", wall))
     pre_mono = float(u.get("last_mono", 0.0))
+    boot_now = _boot_id() if boot is None else int(boot)
+    # 只有同一次开机内的单调时钟读数才可比（重启后它从头开始）
+    mono_usable = (pre_mono > 0
+                   and (not boot_now or not u.get("boot")
+                        or int(u.get("boot", 0)) == boot_now))
     wall_jump = wall - pre_ts
-    mono_jump = (mono_now - pre_mono) if pre_mono > 0 else None
+    mono_jump = (mono_now - pre_mono) if mono_usable else None
     same_day = u.get("date") == today
 
     if not same_day:
@@ -162,14 +188,14 @@ def tick(policy: dict, now: datetime, mono=None):
         # 就在几秒前，单调时钟只走了几秒 —— 于是每个午夜都被误判成"系统日期被改动"，
         # 白扣 tamper_penalty（实机日志：00:00:04 扣减 60 分钟）。
         # 改时间的人只会动墙钟：单调时钟纹丝不动，两者增量必然对不上。
-        rollover_ok = (pre_mono > 0
-                       and mono_jump is not None
+        rollover_ok = (mono_jump is not None
                        and abs(wall_jump - mono_jump) <= TOLERANCE_SECONDS)
         if rollover_ok:
             logger.info(f"跨天：用量从 {u.get('date')} 重置为 {today}（时间连续性校验通过）")
             u = {"date": today, "used": 0.0, "extra": 0.0, "tamper": 0}
             u["last_ts"] = wall
             u["last_mono"] = mono_now
+            u["boot"] = boot_now
             _save(u)
             return 0.0, 0.0, 0
         # 日期跳变一律按篡改处理。注意这里【只能扣一次】：日期跳变本身就意味着
@@ -182,6 +208,7 @@ def tick(policy: dict, now: datetime, mono=None):
     u["date"] = today
     u["last_ts"] = wall
     u["last_mono"] = mono_now
+    u["boot"] = boot_now
     _save(u)
     return float(u.get("used", 0)), float(u.get("extra", 0)), int(u.get("tamper", 0))
 
@@ -194,6 +221,7 @@ def _add_tamper(u: dict, policy: dict, why: str):
     u["date"] = time.strftime("%Y-%m-%d")
     u["last_ts"] = time.time()
     u["last_mono"] = time.monotonic()
+    u["boot"] = _boot_id()
     logger.warn(f"检测到{why}，今日额度扣减 {int(pen)} 分钟（第 {u['tamper']} 次）")
 
 
@@ -203,6 +231,7 @@ def accumulate(minutes: float):
     u["used"] = float(u.get("used", 0)) + max(0.0, minutes)
     u["last_ts"] = time.time()
     u["last_mono"] = time.monotonic()
+    u["boot"] = _boot_id()
     _save(u)
 
 

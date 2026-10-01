@@ -182,6 +182,27 @@ def test_stale_mirror_does_not_override_local():
     print("PASS: 较旧的镜像不会覆盖本地计时状态")
 
 
+def test_reboot_does_not_trigger_tamper():
+    """重启后不能因为单调时钟归零而误判篡改。
+
+    time.monotonic() 每次开机从头开始（Windows 上是开机以来的秒数），
+    所以跨重启比较 last_mono 会算出负增量 —— 必须靠 boot_id 识别并放弃这次比较。
+    否则每次开机第一次 tick 都白扣一次惩罚。
+    """
+    _reset()
+    # 上一次开机：boot=1000，单调时钟已跑到 50000 秒；同一天、用量 80
+    p = paths.usage_path()
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump({"date": DAY.strftime("%Y-%m-%d"), "used": 80.0, "extra": 0.0,
+                   "tamper": 0, "last_ts": DAY.timestamp() - 3600,
+                   "last_mono": 50000.0, "boot": 1000}, fh)
+    # 本次开机：boot=2000（换了），单调时钟才走了 30 秒；墙钟过了 1 小时
+    used, _, tamper = clock.tick(POLICY, DAY, mono=30.0, boot=2000)
+    assert tamper == 0, f"跨重启不该记篡改，实际 tamper={tamper}"
+    assert used == 80.0, f"用量应保持，实际 used={used}"
+    print("PASS: 重启后不误判篡改（boot_id 生效）")
+
+
 def main():
     try:
         for fn in (test_no_reset_on_forward_date_change,
@@ -194,7 +215,8 @@ def main():
                    test_usage_file_tampered_to_zero_restores_from_mirror,
                    test_tamper_count_survives_rollover,
                    test_midnight_rollover_not_treated_as_tamper,
-                   test_stale_mirror_does_not_override_local):
+                   test_stale_mirror_does_not_override_local,
+                   test_reboot_does_not_trigger_tamper):
             fn()
     finally:
         shutil.rmtree(_TMP, ignore_errors=True)

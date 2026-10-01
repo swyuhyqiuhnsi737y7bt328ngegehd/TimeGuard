@@ -274,7 +274,8 @@ def main():
             _apply_extra_requests()
             now = datetime.now()
             now_ts_wall = now.timestamp()
-            used, extra, _ = clock.tick(cfg, now, mono=time.monotonic())
+            used, extra, _ = clock.tick(cfg, now, mono=time.monotonic(),
+                                          boot=clock._boot_id())
             quota = policy.quota_for(cfg, now)
             allowed = quota + extra
             in_forb, until = policy.forbidden_window_info(cfg, now)
