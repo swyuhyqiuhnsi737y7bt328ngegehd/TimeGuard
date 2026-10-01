@@ -150,6 +150,38 @@ def test_tamper_count_survives_rollover():
     print("PASS: 篡改计数可持续累计")
 
 
+def test_midnight_rollover_not_treated_as_tamper():
+    """真机 bug 回归：午夜正常跨天，绝不能误判成"系统日期被改动"并扣惩罚。
+
+    实机日志实锤（v1.0.2）：
+        2026-10-01 00:00:04 [WARN] 检测到系统日期被改动，今日额度扣减 60 分钟（第 2 次）
+    配额 120 被白扣 60 变成实际 60，于是很快就"配额已用完"。
+    根因是当时的镜像兜底会拿【同日但过期的】镜像覆盖本地状态，把 last_mono 弄陈旧，
+    于是 (mono_jump >= 300 且与墙钟增量一致) 这个合法跨天判据失效。
+    """
+    _reset()
+    _seed(used=50.0, mono=1000.0, date=datetime(2026, 3, 10, 23, 59, 50))
+    used, extra, tamper = clock.tick(POLICY, datetime(2026, 3, 11, 0, 0, 10),
+                                     mono=1000.0 + 20)
+    assert tamper == 0, f"合法跨天不该记篡改，实际 tamper={tamper}"
+    # 跨天重置后 used 归零；若被误判篡改会变成 50+60=110（或保留 50）
+    assert used == 0.0, f"合法跨天应重置用量，实际 used={used}"
+    print("PASS: 午夜跨天不被误判为篡改（真机 bug 回归）")
+
+
+def test_stale_mirror_does_not_override_local():
+    """镜像比本地旧时，绝不能拿它覆盖本地（这正是上面误判的根因）。"""
+    _reset()
+    _seed(used=10.0, mono=5000.0)
+    clock.tick(POLICY, DAY + timedelta(seconds=5), mono=5005.0)   # 建立镜像
+    # 本地继续推进（时间戳更新），镜像仍是上面那一刻的旧快照
+    _seed(used=90.0, mono=9000.0)
+    u = clock.load_usage()
+    assert float(u.get("used", 0)) == 90.0, f"更旧的镜像不该覆盖本地，实际 {u}"
+    assert float(u.get("last_mono", 0)) == 9000.0, f"本地时间戳被镜像覆盖了：{u}"
+    print("PASS: 较旧的镜像不会覆盖本地计时状态")
+
+
 def main():
     try:
         for fn in (test_no_reset_on_forward_date_change,
@@ -160,7 +192,9 @@ def main():
                    test_normal_tick_accumulates,
                    test_usage_file_deleted_restores_from_mirror,
                    test_usage_file_tampered_to_zero_restores_from_mirror,
-                   test_tamper_count_survives_rollover):
+                   test_tamper_count_survives_rollover,
+                   test_midnight_rollover_not_treated_as_tamper,
+                   test_stale_mirror_does_not_override_local):
             fn()
     finally:
         shutil.rmtree(_TMP, ignore_errors=True)

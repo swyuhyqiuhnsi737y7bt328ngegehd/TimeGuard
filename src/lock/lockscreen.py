@@ -8,6 +8,7 @@ Alt+F4、任务管理器等逃生键）；家长密码解锁（自动加时）�
 import os
 import time
 import tkinter as tk
+from datetime import datetime
 
 from core import policy
 from lock import winlock
@@ -43,18 +44,31 @@ def _release_lock(state):
 def _unlock(top, state, entry, hint):
     pwd = entry.get()
     cfg = policy.load()
-    if policy.password_ok(cfg, pwd):
-        try:
-            from core import clock
-            m = clock.write_extra_request(int(cfg.get("extra_minutes_per_unlock", 30)))
-            logger.info(f"密码正确，申请加时 {int(m)} 分钟")
-        except Exception as e:
-            logger.error(f"加时申请失败: {e}")
-        enforcer_clear_lock()
-        _release_lock(state)
-    else:
+    if not policy.password_ok(cfg, pwd):
         entry.delete(0, "end")
         hint.configure(text="密码错误，请重试")
+        return
+
+    # 加时必须在解除锁定【之前】成功写入：写不进去就清锁，core 下一轮会立刻重新锁上，
+    # 家长看到的就是"密码明明对了却又被锁"（反复输密码的另一种成因）。
+    try:
+        from core import clock
+        u = util.read_json(paths.usage_path(), {}) or {}
+        used = float(u.get("used", 0) or 0)
+        extra = float(u.get("extra", 0) or 0)
+        quota = policy.quota_for(cfg, datetime.now())
+        bonus = int(cfg.get("extra_minutes_per_unlock", 30))
+        want = clock.unlock_extra_minutes(used, extra, quota, bonus)
+        m = clock.write_extra_request(want)
+        if m < want - 0.5:
+            logger.warn(f"解锁加时被上限截断：需要 {int(want)} 分钟，实际只加了 {int(m)} 分钟")
+        logger.info(f"密码正确，申请加时 {int(m)} 分钟（已用 {int(used)} / 可用 {int(quota + extra)}）")
+    except Exception as e:
+        logger.error(f"加时申请失败，本次不解锁（避免解锁后被立刻重新锁上）: {e}")
+        hint.configure(text="加时申请失败，请重试或检查日志")
+        return
+    enforcer_clear_lock()
+    _release_lock(state)
 
 
 def enforcer_clear_lock():
@@ -95,7 +109,6 @@ def _show_lock(root, flag, state):
     state["count"] = count
     # 用量信息
     try:
-        from datetime import datetime
         u = util.read_json(paths.usage_path(), {})
         used = float(u.get("used", 0))
         extra = float(u.get("extra", 0))

@@ -66,6 +66,19 @@ def main():
     os.remove(clock.extra_req_path())
     print("PASS: 单次加时被夹到上限内")
 
+    # 9) 解锁必须一次就把锁解开（真机 bug 回归）
+    #    实机日志：已用 180 / 配额 120，欠 60 分钟，而每次解锁只加固定 30：
+    #      07:56:55 加 30 -> 180/150 仍超，立刻重新锁定
+    #      07:57:06 加 30 -> 180/180 刚好相等，还是锁
+    #      07:57:16 加 30 -> 180/210 才解除   （家长连输三次密码）
+    m = clock.unlock_extra_minutes(180, 0, 120, 30)
+    assert m == 90.0, f"欠 60 分钟时应加 90（清债+奖励），实际 {m}"
+    assert 120 + m > 180, "加完之后必须真的解锁"
+    assert clock.unlock_extra_minutes(30, 0, 120, 30) == 30.0, "没欠债只给奖励"
+    assert clock.unlock_extra_minutes(300, 30, 120, 30) == 180.0, "欠更多时加更多"
+    assert clock.unlock_extra_minutes(120, 0, 120, 0) >= 1.0, "奖励缺失也要给正数"
+    print("PASS: 解锁加时足以一次清掉超额（真机 bug 回归）")
+
     print("\n加时请求签名测试全部通过")
     return 0
 

@@ -26,8 +26,6 @@ MAX_EXTRA_MINUTES = 1440
 
 # 时间连续性判定的容差：让 NTP 校时/夏令时这类正常微调不误报
 TOLERANCE_SECONDS = 120
-# 合法的"跨天"至少得有这么长的真实（单调时钟）流逝 —— 崩溃重启丢掉几分钟是正常的
-MIN_DAY_ROLLOVER_SECONDS = 300
 
 # usage.json 的注册表镜像（与 configmac 用注册表做备份镜像同一思路）。
 # 为什么不只靠文件：usage.json 是唯一的计费凭证，删掉/写坏就会"静默归零"，
@@ -62,10 +60,17 @@ def _reg_mirror_write(raw: str):
 def _mirror_backup(local: dict) -> dict:
     """决定是否要用注册表镜像兜底，以及兜底后重新落盘的副本。
 
-    只在两种情况下兜底，避免把旧数据当成新数据覆盖掉：
-      • 本地文件整个没了 / 结构坏了（used 缺失）；
-      • 本地那份的日期比镜像旧（文件被还原成旧副本）。
-    同一天时取两者较大的 used —— 删文件回退到旧镜像不该变成"减负"。
+    ⚠️ 只在"本地文件整份没了/坏了"或"本地那份明显旧于镜像"时才兜底 ——
+    也就是【镜像版本比本地旧的任何情况都不兜底】。
+
+    血泪教训（实机 bug）：原来多加了一条"同一天就取两者较大的 used"，
+    结果镜像里那份的 last_mono 是陈旧的，被取用后把时间连续性判据搞坏了 ——
+    正常午夜跨天被误判成"系统日期被改动"，白扣 60 分钟惩罚。
+    日志实锤：00:00:04 [WARN] 检测到系统日期被改动，今日额度扣减 60 分钟（第 2 次）。
+    用量文件本身已被 fileguard 占用句柄保护，且时钟状态必须自洽，
+    所以同一天仍然要防"把 used 改小"（取较大的 used），
+    但【时间戳一律用本地文件的】—— 镜像那份的 last_mono 可能已经过期，
+    拿它当基准正是上面误判的根源。
     """
     raw = _reg_mirror_read()
     if not raw:
@@ -84,27 +89,30 @@ def _mirror_backup(local: dict) -> dict:
         if str(mirror.get("date", "")) > str(local.get("date", "")):
             logger.warn("计时凭证 usage.json 的日期比镜像旧，已用镜像恢复（疑似被还原成旧副本）")
             return mirror
-        if str(mirror.get("date", "")) == str(local.get("date", "")) \
-                and float(mirror.get("used", 0)) > float(local.get("used", 0)):
+        if (str(mirror.get("date", "")) == str(local.get("date", ""))
+                and float(mirror.get("used", 0)) > float(local.get("used", 0))):
             logger.warn("计时凭证 usage.json 的用量低于镜像，已取较大值（删除/回退文件不会重置额度）")
-            return mirror
+            # 只顶回 used；时间戳保持本地那份（镜像的时间戳可能已过期，
+            # 用它当基准会把跨天判据算错 —— 见上面的实机 bug 说明）
+            return dict(local, used=float(mirror.get("used", 0)))
     except (TypeError, ValueError):
         return mirror
     return None
 
 
 def load_usage() -> dict:
-    """读当日用量；文件缺失/损坏时用注册表镜像兜底，而不是静默归零。"""
+    """读当日用量；文件缺失/损坏时用注册表镜像兜底，而不是静默归零。
+
+    兜底时【整份取镜像】（含 last_ts / last_mono）：镜像存的是写入那一刻的自洽快照，
+    只拿 used 而保留陈旧时间戳会让时间连续性判据失真。
+    """
     u = util.read_json(paths.usage_path(), {})
     if not isinstance(u, dict):
         u = {}
     backup = _mirror_backup(u)
     if backup is None:
         return u
-    try:
-        return u if float(backup.get("used", 0)) <= float(u.get("used", 0)) else backup
-    except (TypeError, ValueError):
-        return backup
+    return backup
 
 
 def _save(u):
@@ -148,9 +156,14 @@ def tick(policy: dict, now: datetime, mono=None):
     same_day = u.get("date") == today
 
     if not same_day:
+        # 合法跨天的唯一判据：墙钟与单调时钟【同步前进】（差值在容差内）。
+        #
+        # 这里曾经写成 "mono_jump >= 300 秒"，是错的：正常跨天时最后一次 tick
+        # 就在几秒前，单调时钟只走了几秒 —— 于是每个午夜都被误判成"系统日期被改动"，
+        # 白扣 tamper_penalty（实机日志：00:00:04 扣减 60 分钟）。
+        # 改时间的人只会动墙钟：单调时钟纹丝不动，两者增量必然对不上。
         rollover_ok = (pre_mono > 0
                        and mono_jump is not None
-                       and mono_jump >= MIN_DAY_ROLLOVER_SECONDS
                        and abs(wall_jump - mono_jump) <= TOLERANCE_SECONDS)
         if rollover_ok:
             logger.info(f"跨天：用量从 {u.get('date')} 重置为 {today}（时间连续性校验通过）")
@@ -246,6 +259,25 @@ def read_extra_request(max_minutes: int = MAX_EXTRA_MINUTES):
     if m is None and isinstance(req, dict):
         logger.warn("加时请求未通过校验（无签名/签名错误/过期/超限），已忽略")
     return m
+
+
+def unlock_extra_minutes(used: float, extra: float, quota: float,
+                        bonus: float) -> float:
+    """算出"这一次解锁"要加多少分钟，才能真的把锁解开。
+
+    背景（实机 bug）：解锁固定只加 extra_minutes_per_unlock（30 分钟）。
+    可是被锁住时用量往往【已经超过配额】——比如已用 180 / 配额 120，欠 60 分钟。
+    这时加 30 只是把 allowed 从 120 抬到 150，仍然 180 > 150，core 下一轮立刻重新锁定，
+    家长就得反复输密码：日志实锤 07:56:55 / 07:57:06 / 07:57:16 连输三次才解开。
+
+    所以一次解锁应该直接补到"够用"：清掉超额部分 + 正常奖励分钟数。
+    """
+    used = float(used or 0.0)
+    extra = float(extra or 0.0)
+    quota = float(quota or 0.0)
+    bonus = max(1.0, float(bonus or 0.0))
+    deficit = used - (quota + extra)
+    return max(bonus, deficit + bonus) if deficit > 0 else bonus
 
 
 def write_extra_request(minutes: float):
