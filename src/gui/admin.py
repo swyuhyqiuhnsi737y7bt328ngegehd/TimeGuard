@@ -214,8 +214,15 @@ def _cleanup_quit_flag():
 
 def _quit_mode():
     """--quit 模式：独立进程的家长密码确认框（由托盘菜单拉起）。"""
+    logger.info("--quit 模式：启动退出确认窗口")
     if not util.single_instance("admin_quit"):
-        return  # 已有一个确认框在显示，忽略重复点击
+        # 已有确认框在显示：把它切到前台，而不是静默什么都不做
+        logger.warn("--quit 模式：已有确认窗口在显示，尝试切到前台")
+        try:
+            util.activate_existing_window("admin.exe")
+        except Exception as e:
+            logger.warn(f"激活已有确认窗口失败：{e}")
+        return
     try:
         top = tk.Tk()
         top.title("退出 TimeGuard")
@@ -235,13 +242,16 @@ def _quit_mode():
         def submit():
             if policy.password_ok(policy.load(), entry.get()):
                 util.write_quit_flag()
+                logger.info("退出确认：密码正确，已写入退出标记，等待保护环退出")
                 threading.Thread(target=_cleanup_quit_flag, daemon=True).start()
                 top.destroy()
             else:
+                logger.warn("退出确认：密码错误")
                 entry.delete(0, "end")
                 err.configure(text="密码错误")
 
         def cancel():
+            logger.info("退出确认：用户取消")
             top.destroy()
 
         tk.Button(btns, text="确定", width=8, command=submit).pack(side="left", padx=8)
@@ -256,9 +266,10 @@ def _quit_mode():
         _fit_and_center(top)
         top.focus_force()
         entry.focus_set()
+        logger.info("退出确认窗口已显示")
         top.mainloop()
     except Exception as e:
-        logger.error(f"退出确认窗口异常: {e}")
+        logger.error(f"退出确认窗口异常: {e}\n{traceback.format_exc()}")
 
 
 def _remove_run_key():

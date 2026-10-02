@@ -252,17 +252,26 @@ def kill_pids(pids):
 def spawn(cmd, env=None, cwd=None):
     """孤儿化启动进程（隐藏控制台窗口）。失败返回 None。
 
-    通过 cmd.exe start 孵化：start 启动目标后 cmd 立即退出，目标进程
-    成为孤儿（父进程已死）。这样 taskkill /T（结束进程树）杀掉调用方时
-    不会把守护进程连带清除——守望环中 core/guardian/fileguard 互相拉起
-    的前提是彼此不在对方的进程树里（漏洞修复：锁屏下 Ctrl+Alt+Del ->
-    任务管理器结束 core 进程树曾导致守护全灭）。
+    需要"目标进程不在调用方进程树里"，这样 taskkill /T（结束进程树）杀掉调用方时
+    不会把守护进程连带清除 —— 守望环互相拉起的前提（历史漏洞：锁屏下 Ctrl+Alt+Del ->
+    任务管理器结束 core 进程树，导致守护全灭）。
+
+    ⚠️ 不要再改回 "cmd.exe /c start" 来孵化！那正是实机 bug 的根因：
+    cmd.exe 属于锁屏期间的封杀名单（restrictor.LOCKDOWN_TARGETS），限制执行器每秒
+    杀一次 cmd.exe —— 于是【锁定期间任何 spawn 都会被连带杀掉】：托盘点"退出程序"
+    拉不起确认窗口，点了毫无反应，日志里也一行都不留（cmd 还没来得及跑就没了）。
+    改用 CreateProcess 的 DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP：
+      • DETACHED_PROCESS      不继承控制台、脱离调用方，等价于孤儿化；
+      • CREATE_NEW_PROCESS_GROUP  自成进程组，父进程被杀不会波及；
+      • CREATE_NO_WINDOW      给控制台程序（fileguard 等）藏窗口。
     """
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+             | getattr(subprocess, "CREATE_NO_WINDOW", 0))
     try:
-        target = subprocess.list2cmdline(cmd)
-        return subprocess.Popen(["cmd.exe", "/c", "start", "", "/b", target],
-                                creationflags=flags, env=env, cwd=cwd, close_fds=True)
+        return subprocess.Popen(list(cmd), creationflags=flags, env=env, cwd=cwd,
+                                close_fds=True, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
         logger.error(f"孤儿化启动进程失败 {cmd}: {e}")
         return None

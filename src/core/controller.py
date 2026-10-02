@@ -51,10 +51,21 @@ def _quit_app():
     不在托盘线程里创建 Tk（狂点输入框曾导致整进程卡退）；
     多开时第二个实例会因独立互斥体自动退出，不会叠加弹窗。
     """
+    # 这条路径以前【成功时不留任何日志】，于是"点了退出没反应"在日志里完全查不到 ——
+    # 每一步都留痕，下次就能一眼看出卡在哪。
+    logger.info("托盘：收到\"退出程序\"请求，正在拉起密码确认窗口")
     try:
-        util.spawn_service("admin", ["--quit"])
+        proc = util.spawn_service("admin", ["--quit"])
     except Exception as e:
-        logger.error(f"启动退出确认窗口失败: {e}")
+        logger.error(f"启动退出确认窗口失败（异常）：{e}")
+        return
+    if proc is None:
+        # spawn_service 在找不到 exe 时静默返回 None —— 必须报出来
+        exe = paths.service_exe("admin") if paths.is_frozen() else "(源码模式 admin)"
+        logger.error(f"启动退出确认窗口失败：没能拉起进程（{exe}）")
+        util.notify_ui("TimeGuard", "无法打开退出确认窗口，请查看日志。")
+        return
+    logger.info(f"托盘：退出确认窗口进程已拉起 pid={getattr(proc, 'pid', '?')}")
 
 
 def start_tray():

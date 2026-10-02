@@ -133,9 +133,16 @@ def _boot_id() -> int:
     """
     try:
         import ctypes
-        ms = ctypes.c_ulonglong(0)
-        if ctypes.windll.kernel32.GetTickCount64(ctypes.byref(ms)):
-            return int(time.time() - ms.value / 1000.0)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # ⚠️ restype 必须显式声明：ctypes 默认把返回值当 32 位 int，
+        # 而 GetTickCount64 返回 ULONGLONG（开机以来的毫秒数）。
+        # 之前写成"传指针"的调用方式，结果恒返回 0 —— boot 字段退化成当前时间，
+        # 跨重启识别随之失效（每次都算作"换了开机"）。
+        k32.GetTickCount64.restype = ctypes.c_ulonglong
+        k32.GetTickCount64.argtypes = []
+        ms = k32.GetTickCount64()
+        if ms > 0:
+            return int(time.time() - ms / 1000.0)
     except Exception:
         pass
     return 0
