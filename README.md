@@ -74,11 +74,15 @@ PyInstaller / Nuitka 两种方式打包 Python 部分；C 部分用 MinGW-w64 gc
 ## 二点五、预编译版（免 Python，推荐普通用户）
 
 从 [Releases](https://github.com/swyuhyqiuhnsi737y7bt328ngegehd/TimeGuard/releases/latest) 下载
-`TimeGuard-v1.0.2-win64.zip`，解压到任意目录（路径避免中文）后：
+`TimeGuard-v1.0.3-win64.zip`（[直接下载](https://github.com/swyuhyqiuhnsi737y7bt328ngegehd/TimeGuard/releases/download/v1.0.3/TimeGuard-v1.0.3-win64.zip)），解压到任意目录（路径避免中文）后：
 
 1. 双击 `core.exe` —— 主控启动，自动写入开机自启动并部署守护副本；
 2. 双击 `admin.exe` 设置家长密码（密码为空时限制不生效），并按需勾选系统功能限制；
 3. 到时间自动全屏锁定，输入家长密码解锁即加时；卸载用 admin.exe -> 卸载。
+
+> **v1.0.3 起不再随包附带 `cygwin1.dll`**：C 部分已改用 MinGW-w64 编译，产物自包含。
+> 压缩包内另有 `driver/`（磁盘还原的可选内核驱动，需手动关掉驱动签名强制才能加载，
+> 不做这步完全不影响其它功能，详见下文「六点五」）。
 
 > 360/Defender 可能误报进程自我保护行为，请把目录加入信任区（本程序非恶意软件，源码全公开）。
 
