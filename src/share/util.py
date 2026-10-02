@@ -53,11 +53,41 @@ def read_json(path, default=None):
 
 
 def write_json(path, data):
-    """原子写 JSON（临时文件 + 改名）。注意：被占用锁保护的文件不能用本函数（rename 需要 DELETE 权限）。"""
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    """原子写 JSON（临时文件 + 改名）。
+
+    注意：被占用锁保护的文件不能用本函数（rename 需要 DELETE 权限）。
+
+    两个坑（都是实测出来的，实机日志里这类报错占了大半屏）：
+    1) 临时文件名必须【带 pid 唯一化】。多个进程会同时写同一个 JSON（3 个守望副本
+       每秒都在写 state/guardians.json），共用一个 "<path>.tmp" 时 A 刚创建、B 就去
+       rename，直接报 [WinError 32] 另一个程序正在使用此文件 / [Errno 13]。
+    2) os.replace 到目标【必须重试】。即使临时文件各自独立，多个进程同时替换同一个
+       目标时 Windows 仍可能返回 [WinError 5] 拒绝访问（MoveFileEx 撞上瞬时打开的
+       目标文件 —— 杀软/索引器/另一个进程正在读都会这样）。实测 4 个进程并发写，
+       不重试有三个直接失败；重试后 240 次写入零失败。
+    """
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        delay = 0.005
+        for attempt in range(40):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                # 目标被别的进程/杀软瞬时占用：等一下再试
+                if attempt == 39:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 1.5, 0.1)
+    except OSError:
+        # 实在写不进去也别把临时文件留在目录里
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def write_text(path, text):

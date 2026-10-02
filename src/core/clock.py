@@ -181,28 +181,39 @@ def tick(policy: dict, now: datetime, mono=None, boot=None):
     mono_jump = (mono_now - pre_mono) if mono_usable else None
     same_day = u.get("date") == today
 
+    # 两个时钟是否"对得上"：对得上说明这段时间正常流逝；对不上才可能是有人改时间。
+    #   mono_jump 为 None（换了开机、没有基准）时无法判断，不据此定罪、也不据此放行。
+    consistent = mono_jump is not None and \
+        abs(wall_jump - mono_jump) <= TOLERANCE_SECONDS
+    # 换了开机（重启过）：单调时钟从头开始，本就不能比较。
+    # 而"晚上关机、第二天开机"必然跨天 —— 这是完全正常的用法，
+    # 绝不能因为跨了重启就判成改时间（实机日志：2026-10-02 08:53:04 第 3 次误判）。
+    rebooted = (not mono_usable) or (mono_jump is None)
+
     if not same_day:
-        # 合法跨天的唯一判据：墙钟与单调时钟【同步前进】（差值在容差内）。
-        #
-        # 这里曾经写成 "mono_jump >= 300 秒"，是错的：正常跨天时最后一次 tick
-        # 就在几秒前，单调时钟只走了几秒 —— 于是每个午夜都被误判成"系统日期被改动"，
-        # 白扣 tamper_penalty（实机日志：00:00:04 扣减 60 分钟）。
-        # 改时间的人只会动墙钟：单调时钟纹丝不动，两者增量必然对不上。
-        rollover_ok = (mono_jump is not None
-                       and abs(wall_jump - mono_jump) <= TOLERANCE_SECONDS)
+        # 【跨天】什么时候算正常：
+        #   • 重启过：单调时钟归零，本来就无从比较。晚上关机、第二天开机必然跨天，
+        #     这是最常见的正常用法（实机日志：2026-10-02 08:53:04 第 3 次误判就是这么来的）。
+        #   • 同一次开机内、两个时钟同步前进：正常午夜跨天。
+        # 两者都放行，但 rebooted 分支留一条 WARN —— 它同样也是"改完时间再重启"的样子，
+        # 认不出来就至少要留痕（这条曾经把每个正常开机都罚了 60 分钟，所以不能再罚）。
+        if rebooted:
+            logger.warn(f"日期从 {u.get('date')} 变为 {today}（重启后首次检查，无法比对单调时钟）")
+            rollover_ok = True
+        else:
+            rollover_ok = consistent
         if rollover_ok:
-            logger.info(f"跨天：用量从 {u.get('date')} 重置为 {today}（时间连续性校验通过）")
+            logger.info(f"跨天：用量从 {u.get('date')} 重置为 {today}")
             u = {"date": today, "used": 0.0, "extra": 0.0, "tamper": 0}
             u["last_ts"] = wall
             u["last_mono"] = mono_now
             u["boot"] = boot_now
             _save(u)
             return 0.0, 0.0, 0
-        # 日期跳变一律按篡改处理。注意这里【只能扣一次】：日期跳变本身就意味着
-        # 墙钟与单调时钟不一致，再走下面那条检查会把同一次篡改罚两遍。
         _add_tamper(u, policy, "系统日期被改动")
-    elif mono_jump is not None and abs(wall_jump - mono_jump) > TOLERANCE_SECONDS:
-        # 同一天内把时钟往前/往后拨（没跨日期边界）
+    elif not rebooted and mono_jump is not None \
+            and abs(wall_jump - mono_jump) > TOLERANCE_SECONDS:
+        # 同一天内把时钟往前/往后拨（两个时钟对不上）
         _add_tamper(u, policy, "系统时间被大幅调整")
 
     u["date"] = today

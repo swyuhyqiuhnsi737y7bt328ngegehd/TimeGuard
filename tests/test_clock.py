@@ -203,6 +203,41 @@ def test_reboot_does_not_trigger_tamper():
     print("PASS: 重启后不误判篡改（boot_id 生效）")
 
 
+def test_reboot_across_midnight_is_normal():
+    """真机 bug 回归：晚上关机、第二天开机必然跨天，绝不能被判成改时间。
+
+    实机日志：2026-10-02 08:53:04 [WARN] 检测到系统日期被改动，今日额度扣减 60 分钟（第 3 次）
+    —— 那是重启后的第一次检查。单调时钟随重启归零、本来就没法比较，
+    却被当成"日期跳变 = 篡改"，于是每天开一次机就白扣一次 60 分钟。
+    """
+    _reset()
+    with open(paths.usage_path(), "w", encoding="utf-8") as fh:
+        json.dump({"date": datetime(2026, 3, 10, 23, 0).strftime("%Y-%m-%d"),
+                   "used": 120.0, "extra": 0.0, "tamper": 2,
+                   "last_ts": datetime(2026, 3, 10, 23, 0).timestamp(),
+                   "last_mono": 50000.0, "boot": 1000}, fh)
+    used, extra, tamper = clock.tick(POLICY, datetime(2026, 3, 11, 8, 0, 0),
+                                     mono=30.0, boot=2000)
+    assert used == 0.0, f"跨重启跨天应重置用量，实际 used={used}"
+    assert tamper == 0, f"跨重启跨天不该记篡改，实际 tamper={tamper}"
+    print("PASS: 重启后的跨天是正常的（真机 bug 回归）")
+
+
+def test_multiday_jump_after_reboot_is_tolerated_but_logged():
+    """改时间后重启：认不出来就放行（否则每个正常开机都被罚），但绝不越权扣钱。"""
+    _reset()
+    with open(paths.usage_path(), "w", encoding="utf-8") as fh:
+        json.dump({"date": datetime(2026, 3, 10, 23, 0).strftime("%Y-%m-%d"),
+                   "used": 100.0, "extra": 0.0, "tamper": 0,
+                   "last_ts": datetime(2026, 3, 10, 23, 0).timestamp(),
+                   "last_mono": 50000.0, "boot": 1000}, fh)
+    used, _, tamper = clock.tick(POLICY, datetime(2026, 3, 12, 9, 0, 0),
+                                 mono=10.0, boot=3000)
+    assert used == 0.0, f"新的一天应从 0 开始计，实际 {used}"
+    assert tamper == 0, f"重启后无法比对，不该擅自扣钱，实际 tamper={tamper}"
+    print("PASS: 重启后的日期变化放行且不误扣（另留 WARN 便于排查）")
+
+
 def main():
     try:
         for fn in (test_no_reset_on_forward_date_change,
@@ -216,7 +251,9 @@ def main():
                    test_tamper_count_survives_rollover,
                    test_midnight_rollover_not_treated_as_tamper,
                    test_stale_mirror_does_not_override_local,
-                   test_reboot_does_not_trigger_tamper):
+                   test_reboot_does_not_trigger_tamper,
+                   test_reboot_across_midnight_is_normal,
+                   test_multiday_jump_after_reboot_is_tolerated_but_logged):
             fn()
     finally:
         shutil.rmtree(_TMP, ignore_errors=True)
